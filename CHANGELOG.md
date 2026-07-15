@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 0.1.2 (2026-07-15)
+
+### Performance
+
+- optimize token storage and image delivery (837b75b)
+
 ## 0.1.1 (2026-07-15)
 
 ### Other Changes
