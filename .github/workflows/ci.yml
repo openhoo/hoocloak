@@ -22,7 +22,7 @@ jobs:
   commitlint:
     name: Conventional Commits
     if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'self-hosted' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -64,7 +64,7 @@ jobs:
   test:
     name: Go tests
     needs: commitlint
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'self-hosted' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -89,7 +89,7 @@ jobs:
     needs:
       - commitlint
       - test
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'self-hosted' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       COMPOSE_PROJECT_NAME: hoocloak-ci-${{ github.run_id }}
