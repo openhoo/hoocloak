@@ -1,4 +1,5 @@
 /hoocloak
+.hooversion/
 ui/login/node_modules/
 examples/react-spa/node_modules/
 examples/react-spa/dist/

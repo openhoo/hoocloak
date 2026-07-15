@@ -1,13 +1,28 @@
 package main
 
 import (
+	"bytes"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/openhoo/hoocloak/internal/config"
+	buildversion "github.com/openhoo/hoocloak/internal/version"
 )
+
+func TestVersionCommand(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := run([]string{"version"}, strings.NewReader(""), &output, logger); err != nil {
+		t.Fatalf("run(version) error = %v", err)
+	}
+	if got := strings.TrimSpace(output.String()); got != buildversion.Value {
+		t.Fatalf("version output = %q, want %q", got, buildversion.Value)
+	}
+}
 
 func TestApplyEnvironmentOverridesThemeDirectory(t *testing.T) {
 	t.Setenv("HOOCLOAK_UI_THEME_DIR", "/opt/hoocloak/theme")

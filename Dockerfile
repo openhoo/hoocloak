@@ -12,7 +12,11 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 COPY --from=login /src/internal/idp/ui/dist ./internal/idp/ui/dist
-RUN CGO_ENABLED=0 go build -tags no_otel -trimpath -ldflags="-s -w" -o /out/hoocloak ./cmd/hoocloak
+ARG VERSION
+RUN VERSION="${VERSION:-$(cat internal/version/version)}" && \
+    CGO_ENABLED=0 go build -tags no_otel -trimpath \
+      -ldflags="-s -w -X github.com/openhoo/hoocloak/internal/version.Value=${VERSION}" \
+      -o /out/hoocloak ./cmd/hoocloak
 
 FROM scratch
 USER 65532:65532

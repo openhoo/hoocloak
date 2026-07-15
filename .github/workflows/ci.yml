@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_VERSION: 1.3.14
+  HOOVERSION_SHA: 799ecf4a9c29e8ce4d5ad7055a6030adf665cf82 # v0.2.0
+
+jobs:
+  commitlint:
+    name: Conventional Commits
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'self-hosted' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Hooversion
+        run: |
+          set -euo pipefail
+          install_dir="$(mktemp -d "$RUNNER_TEMP/hooversion.XXXXXXXX")"
+          echo "HOOVERSION_DIR=$install_dir" >> "$GITHUB_ENV"
+          git init "$install_dir"
+          git -C "$install_dir" fetch --depth 1 https://github.com/openhoo/hooversion.git "$HOOVERSION_SHA"
+          git -C "$install_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$install_dir" rev-parse HEAD)" = "$HOOVERSION_SHA"
+          cd "$install_dir"
+          bun install --frozen-lockfile
+
+      - name: Lint commits
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            bun "$HOOVERSION_DIR/src/cli.ts" lint \
+              --from "${{ github.event.pull_request.base.sha }}" \
+              --to "${{ github.event.pull_request.head.sha }}"
+          else
+            bun "$HOOVERSION_DIR/src/cli.ts" lint --last
+          fi
+
+      - name: Remove Hooversion checkout
+        if: always()
+        run: test -z "${HOOVERSION_DIR:-}" || rm -rf "$HOOVERSION_DIR"
+
+  test:
+    name: Go tests
+    needs: commitlint
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'self-hosted' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.x
+          cache: true
+
+      - name: Test
+        run: go test -race -tags no_otel ./...
+
+      - name: Vet
+        run: go vet -tags no_otel ./...
+
+      - name: Verify modules
+        run: go mod verify
+
+  docker:
+    name: Docker Compose build
+    needs:
+      - commitlint
+      - test
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'self-hosted' }}
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: hoocloak-ci-${{ github.run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Validate Compose
+        run: docker compose config --quiet
+
+      - name: Build all images
+        run: docker compose build
+
+      - name: Remove CI images
+        if: always()
+        run: docker compose down --rmi local --remove-orphans

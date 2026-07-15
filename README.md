@@ -50,6 +50,10 @@ Stop the stack with:
 docker compose down --remove-orphans
 ```
 
+Print the binary version with `hoocloak version`. Local builds use the version
+in [`internal/version/version`](internal/version/version); release images stamp
+the same released version into the binary.
+
 If your host does not resolve `app.localhost`, `api.localhost`, and `hoocloak.localhost` to loopback, map all three names to `127.0.0.1`. Keep the issuer byte-for-byte identical in the browser, API, and provider.
 
 ## Configuration
@@ -133,6 +137,21 @@ go test -tags no_otel ./...
 ```
 
 The root Dockerfile performs the SolidJS build before compiling Hoocloak, preventing stale assets in container images.
+
+## Releases
+
+Every commit must use the Conventional Commits format. After CI succeeds on
+`main`, Hooversion derives and publishes the next semantic version:
+
+- `feat:` creates a minor release.
+- `fix:` and `perf:` create a patch release.
+- `type!:` or a `BREAKING CHANGE:` footer creates a major release.
+- Other commit types remain in history without forcing a release.
+
+The release workflow updates `internal/version/version` and `CHANGELOG.md`,
+creates a `chore(release):` commit, tags it, publishes a GitHub Release, and
+pushes `ghcr.io/openhoo/hoocloak` with exact, major/minor, SHA, and `latest`
+tags. Release commits do not recursively trigger another release.
 
 ## React integration
 

@@ -26,6 +26,7 @@ import (
 
 	"github.com/openhoo/hoocloak/internal/config"
 	"github.com/openhoo/hoocloak/internal/idp"
+	buildversion "github.com/openhoo/hoocloak/internal/version"
 )
 
 func main() {
@@ -39,9 +40,15 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout io.Writer, logger *slog.Logger) error {
 	if len(args) == 0 {
-		return errors.New("usage: hoocloak <serve|hash|health>")
+		return errors.New("usage: hoocloak <serve|hash|health|version>")
 	}
 	switch args[0] {
+	case "version":
+		if len(args) != 1 {
+			return errors.New("usage: hoocloak version")
+		}
+		_, err := fmt.Fprintln(stdout, buildversion.Value)
+		return err
 	case "hash":
 		if len(args) != 1 {
 			return errors.New("usage: hoocloak hash")
@@ -61,7 +68,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, logger *slog.Logger) 
 	case "health":
 		return health(args[1:])
 	default:
-		return fmt.Errorf("unknown command %q (expected serve, hash, or health)", args[0])
+		return fmt.Errorf("unknown command %q (expected serve, hash, health, or version)", args[0])
 	}
 }
 
