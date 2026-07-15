@@ -1,0 +1,9 @@
+services:
+  hoocloak:
+    environment:
+      HOOCLOAK_UI_THEME_DIR: /opt/hoocloak/theme
+    volumes:
+      - type: bind
+        source: ${HOOCLOAK_THEME_DIR:?Set HOOCLOAK_THEME_DIR to the host theme directory}
+        target: /opt/hoocloak/theme
+        read_only: true

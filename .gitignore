@@ -1,0 +1,7 @@
+/hoocloak
+ui/login/node_modules/
+examples/react-spa/node_modules/
+examples/react-spa/dist/
+examples/aspnet-api/bin/
+examples/aspnet-api/obj/
+.DS_Store

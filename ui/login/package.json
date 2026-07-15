@@ -1,0 +1,17 @@
+{
+  "name": "@hoocloak/login-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "solid-js": "1.9.14"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.1.4",
+    "vite-plugin-solid": "2.11.12"
+  }
+}
