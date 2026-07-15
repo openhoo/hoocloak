@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/rs/cors v1.11.1
-	github.com/zitadel/oidc/v3 v3.47.8
+	github.com/zitadel/oidc/v3 v3.47.9
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/crypto v0.54.0
 	golang.org/x/text v0.40.0

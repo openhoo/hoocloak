@@ -21,7 +21,15 @@ import (
 	"github.com/openhoo/hoocloak/internal/config"
 )
 
+// dummyPasswordHash is deliberately public and only equalizes the work done for
+// unknown principals. Authentication still fails independently of this value.
+// #nosec G101 -- this is a timing-defense fixture, not a credential.
 const dummyPasswordHash = "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+
+var (
+	errInvalidCredentials = errors.New("Invalid username or password.")
+	errAuthRequestDone    = errors.New("authorization request is already complete")
+)
 
 var (
 	_ op.Storage                        = (*Store)(nil)
@@ -215,9 +223,13 @@ func (s *Store) SaveAuthCode(_ context.Context, requestID, code string) error {
 	now := s.now()
 	s.pruneLocked(now)
 	request, ok := s.authRequests[requestID]
-	if !ok || !request.done || !now.Before(request.expires) {
+	if !ok || !request.done || request.codeSaved || !now.Before(request.expires) {
 		return oidc.ErrInvalidGrant()
 	}
+	if _, exists := s.codes[code]; exists {
+		return oidc.ErrInvalidGrant()
+	}
+	request.codeSaved = true
 	s.codes[code] = codeRecord{requestID: requestID, expires: request.expires}
 	return nil
 }
@@ -239,6 +251,10 @@ func (s *Store) Authenticate(requestID, username, password string) error {
 	s.mu.Lock()
 	s.pruneLocked(now)
 	request, requestOK := s.authRequests[requestID]
+	if requestOK && request.done {
+		s.mu.Unlock()
+		return errAuthRequestDone
+	}
 	userID, userOK := s.usernames[config.CanonicalUsername(username)]
 	user := s.users[userID]
 	hash := dummyPasswordHash
@@ -251,7 +267,7 @@ func (s *Store) Authenticate(requestID, username, password string) error {
 		return errors.New("authorization request is missing or expired")
 	}
 	if !userOK || !passwordOK {
-		return errors.New("Invalid username or password.")
+		return errInvalidCredentials
 	}
 
 	now = s.now()
@@ -261,6 +277,9 @@ func (s *Store) Authenticate(requestID, username, password string) error {
 	request, requestOK = s.authRequests[requestID]
 	if !requestOK {
 		return errors.New("authorization request is missing or expired")
+	}
+	if request.done {
+		return errAuthRequestDone
 	}
 	client := s.clients[request.clientID]
 	if client == nil {
@@ -280,7 +299,9 @@ func (s *Store) Authenticate(requestID, username, password string) error {
 			}
 		}
 	}
+	request.mu.Lock()
 	request.subject, request.scopes, request.authTime, request.amr, request.done = user.ID, granted, now, []string{"pwd"}, true
+	request.mu.Unlock()
 	return nil
 }
 
@@ -489,7 +510,7 @@ func (s *Store) GetClientByClientID(_ context.Context, id string) (op.Client, er
 func (s *Store) AuthorizeClientIDSecret(_ context.Context, id, secret string) error {
 	client := s.clients[id]
 	if client == nil || client.config.Type != config.ClientTypeService {
-		bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(secret))
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(secret))
 		return errors.New("invalid client credentials")
 	}
 	if bcrypt.CompareHashAndPassword([]byte(client.config.SecretHash), []byte(secret)) != nil {
@@ -623,57 +644,99 @@ func (s *Store) ValidateJWTProfileScopes(context.Context, string, []string) ([]s
 func (s *Store) Health(context.Context) error { return nil }
 
 type AuthRequest struct {
+	mu                                               sync.Mutex
 	id, clientID, redirectURI, state, nonce, subject string
 	codeChallenge                                    *oidc.CodeChallenge
 	scopes, audience, amr                            []string
 	responseType                                     oidc.ResponseType
 	responseMode                                     oidc.ResponseMode
 	created, expires, authTime                       time.Time
-	done, accessAudienceReturned                     bool
+	done, codeSaved, accessAudienceReturned          bool
 }
 
-func (r *AuthRequest) GetID() string    { return r.id }
-func (r *AuthRequest) GetACR() string   { return "" }
-func (r *AuthRequest) GetAMR() []string { return slices.Clone(r.amr) }
+func (r *AuthRequest) GetID() string  { return r.id }
+func (r *AuthRequest) GetACR() string { return "" }
+func (r *AuthRequest) GetAMR() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.amr)
+}
 func (r *AuthRequest) GetAudience() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if !r.accessAudienceReturned {
 		r.accessAudienceReturned = true
 		return slices.Clone(r.audience)
 	}
 	return []string{r.clientID}
 }
-func (r *AuthRequest) GetAuthTime() time.Time                { return r.authTime }
+func (r *AuthRequest) GetAuthTime() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.authTime
+}
 func (r *AuthRequest) GetClientID() string                   { return r.clientID }
 func (r *AuthRequest) GetCodeChallenge() *oidc.CodeChallenge { return r.codeChallenge }
 func (r *AuthRequest) GetNonce() string                      { return r.nonce }
 func (r *AuthRequest) GetRedirectURI() string                { return r.redirectURI }
 func (r *AuthRequest) GetResponseType() oidc.ResponseType    { return r.responseType }
 func (r *AuthRequest) GetResponseMode() oidc.ResponseMode    { return r.responseMode }
-func (r *AuthRequest) GetScopes() []string                   { return slices.Clone(r.scopes) }
-func (r *AuthRequest) GetState() string                      { return r.state }
-func (r *AuthRequest) GetSubject() string                    { return r.subject }
-func (r *AuthRequest) Done() bool                            { return r.done }
+func (r *AuthRequest) GetScopes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.scopes)
+}
+func (r *AuthRequest) GetState() string { return r.state }
+func (r *AuthRequest) GetSubject() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.subject
+}
+func (r *AuthRequest) Done() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.done
+}
 
 type RefreshRequest struct {
+	mu                          sync.Mutex
 	clientID, subject, familyID string
 	audience, scopes, amr       []string
 	authTime                    time.Time
 	accessAudienceReturned      bool
 }
 
-func (r *RefreshRequest) GetAMR() []string { return slices.Clone(r.amr) }
+func (r *RefreshRequest) GetAMR() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.amr)
+}
 func (r *RefreshRequest) GetAudience() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if !r.accessAudienceReturned {
 		r.accessAudienceReturned = true
 		return slices.Clone(r.audience)
 	}
 	return []string{r.clientID}
 }
-func (r *RefreshRequest) GetAuthTime() time.Time           { return r.authTime }
-func (r *RefreshRequest) GetClientID() string              { return r.clientID }
-func (r *RefreshRequest) GetScopes() []string              { return slices.Clone(r.scopes) }
-func (r *RefreshRequest) GetSubject() string               { return r.subject }
-func (r *RefreshRequest) SetCurrentScopes(scopes []string) { r.scopes = slices.Clone(scopes) }
+func (r *RefreshRequest) GetAuthTime() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.authTime
+}
+func (r *RefreshRequest) GetClientID() string { return r.clientID }
+func (r *RefreshRequest) GetScopes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.scopes)
+}
+func (r *RefreshRequest) GetSubject() string { return r.subject }
+func (r *RefreshRequest) SetCurrentScopes(scopes []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.scopes = slices.Clone(scopes)
+}
 
 type serviceRequest struct {
 	clientID, subject string
@@ -687,9 +750,9 @@ func (r *serviceRequest) GetScopes() []string   { return slices.Clone(r.scopes) 
 func tokenRequestInfo(request op.TokenRequest) (string, time.Time, []string, error) {
 	switch r := request.(type) {
 	case *AuthRequest:
-		return r.clientID, r.authTime, r.amr, nil
+		return r.clientID, r.GetAuthTime(), r.GetAMR(), nil
 	case *RefreshRequest:
-		return r.clientID, r.authTime, r.amr, nil
+		return r.clientID, r.GetAuthTime(), r.GetAMR(), nil
 	case *serviceRequest:
 		return r.clientID, time.Time{}, nil, nil
 	default:

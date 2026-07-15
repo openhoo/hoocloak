@@ -78,11 +78,20 @@ jobs:
       - name: Test
         run: go test -race -tags no_otel ./...
 
+      - name: Check formatting
+        run: test -z "$(gofmt -l cmd internal)"
+
       - name: Vet
         run: go vet -tags no_otel ./...
 
       - name: Verify modules
         run: go mod verify
+
+      - name: Scan reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -tags no_otel ./...
+
+      - name: Scan Go security patterns
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -quiet -tags no_otel ./...
 
   docker:
     name: Docker Compose build
@@ -98,11 +107,14 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Validate Compose
-        run: docker compose config --quiet
+        run: |
+          docker compose config --quiet
+          HOOCLOAK_THEME_DIR="$RUNNER_TEMP/hoocloak-theme" \
+            docker compose -f compose.yaml -f compose.theme.yaml config --quiet
 
       - name: Build all images
         run: docker compose build
 
       - name: Remove CI images
         if: always()
-        run: docker compose down --rmi local --remove-orphans
+        run: docker compose down --rmi all --volumes --remove-orphans

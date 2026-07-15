@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -428,7 +430,8 @@ func (s *Server) loginGET(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unable to create login", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "hoocloak_csrf", Value: csrf, Path: "/login", MaxAge: 600, Expires: time.Now().Add(10 * time.Minute), HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
+	// #nosec G124 -- Secure is intentionally false only for validated local HTTP issuers.
+	http.SetCookie(w, &http.Cookie{Name: csrfCookieName(id), Value: csrf, Path: "/login", MaxAge: 600, Expires: time.Now().Add(10 * time.Minute), HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
 	s.renderLogin(w, http.StatusOK, loginData{RequestID: id, Client: client, CSRF: csrf})
 }
 func (s *Server) loginPOST(w http.ResponseWriter, r *http.Request) {
@@ -448,21 +451,22 @@ func (s *Server) loginPOST(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired authorization request", http.StatusBadRequest)
 		return
 	}
-	cookie, err := r.Cookie("hoocloak_csrf")
+	cookie, err := r.Cookie(csrfCookieName(id))
 	submitted := r.PostForm.Get("csrf")
 	if err != nil || submitted == "" || !constantTimeEqual(cookie.Value, submitted) {
 		http.Error(w, "invalid CSRF token", http.StatusBadRequest)
 		return
 	}
 	if err := s.Store.Authenticate(id, username, r.PostForm.Get("password")); err != nil {
-		if err.Error() != "Invalid username or password." {
+		if !errors.Is(err, errInvalidCredentials) {
 			http.Error(w, "invalid or expired authorization request", http.StatusBadRequest)
 			return
 		}
 		s.renderLogin(w, http.StatusUnauthorized, loginData{RequestID: id, Client: client, CSRF: submitted, Username: username, Error: "Invalid username or password."})
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "hoocloak_csrf", Value: "", Path: "/login", MaxAge: -1, HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
+	// #nosec G124 -- Secure is intentionally false only for validated local HTTP issuers.
+	http.SetCookie(w, &http.Cookie{Name: csrfCookieName(id), Value: "", Path: "/login", MaxAge: -1, HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, op.AuthCallbackURL(s.Provider)(r.Context(), id), http.StatusSeeOther)
 }
 func (s *Server) renderLogin(w http.ResponseWriter, status int, data loginData) {
@@ -478,6 +482,7 @@ func (s *Server) renderLogin(w http.ResponseWriter, status int, data loginData) 
 func (s *Server) loggedOut(w http.ResponseWriter, r *http.Request) {
 	securityHeaders(w)
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -492,6 +497,11 @@ func (s *Server) loggedOut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+}
+
+func csrfCookieName(requestID string) string {
+	digest := sha256.Sum256([]byte(requestID))
+	return "hoocloak_csrf_" + base64.RawURLEncoding.EncodeToString(digest[:16])
 }
 
 func fmtError(prefix string, err error) error { return fmt.Errorf("%s: %w", prefix, err) }

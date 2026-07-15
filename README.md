@@ -52,7 +52,8 @@ docker compose down --remove-orphans
 
 Print the binary version with `hoocloak version`. Local builds use the version
 in [`internal/version/version`](internal/version/version); release images stamp
-the same released version into the binary.
+the same released version into the binary. Published images support
+`linux/amd64` and `linux/arm64`.
 
 If your host does not resolve `app.localhost`, `api.localhost`, and `hoocloak.localhost` to loopback, map all three names to `127.0.0.1`. Keep the issuer byte-for-byte identical in the browser, API, and provider.
 
@@ -152,6 +153,10 @@ The release workflow updates `internal/version/version` and `CHANGELOG.md`,
 creates a `chore(release):` commit, tags it, publishes a GitHub Release, and
 pushes `ghcr.io/openhoo/hoocloak` with exact, major/minor, SHA, and `latest`
 tags. Release commits do not recursively trigger another release.
+
+## License
+
+[MIT](LICENSE)
 
 ## React integration
 

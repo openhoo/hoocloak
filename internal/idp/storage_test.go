@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,12 +39,32 @@ func TestAuthorizationCodeIsConsumedExactlyOnce(t *testing.T) {
 	if err := store.SaveAuthCode(context.Background(), request.id, "one-time-code"); err != nil {
 		t.Fatalf("SaveAuthCode() error = %v", err)
 	}
+	other := &AuthRequest{
+		id: "other-request", clientID: "react-spa", subject: "alice", done: true,
+		expires: clock.Now().Add(5 * time.Minute), scopes: []string{"openid"},
+	}
+	store.authRequests[other.id] = other
+	if err := store.SaveAuthCode(context.Background(), other.id, "one-time-code"); err == nil {
+		t.Fatal("authorization code collision overwrote an existing code")
+	}
+	if err := store.SaveAuthCode(context.Background(), other.id, "other-code"); err != nil {
+		t.Fatalf("request was consumed by rejected code collision: %v", err)
+	}
+	if err := store.SaveAuthCode(context.Background(), request.id, "second-code"); err == nil {
+		t.Fatal("second authorization code was issued for the same request")
+	}
 	first, err := store.AuthRequestByCode(context.Background(), "one-time-code")
 	if err != nil || first.GetID() != request.id {
 		t.Fatalf("first code redemption = (%v, %v)", first, err)
 	}
 	if _, err := store.AuthRequestByCode(context.Background(), "one-time-code"); err == nil {
 		t.Fatal("second code redemption unexpectedly succeeded")
+	}
+	if _, err := store.AuthRequestByCode(context.Background(), "second-code"); err == nil {
+		t.Fatal("rejected second code was stored")
+	}
+	if redeemed, err := store.AuthRequestByCode(context.Background(), "other-code"); err != nil || redeemed.GetID() != other.id {
+		t.Fatalf("other code redemption = (%v, %v)", redeemed, err)
 	}
 }
 
@@ -57,6 +78,9 @@ func TestAuthenticationIntersectsClientAndUserScopes(t *testing.T) {
 	store.authRequests[request.id] = request
 	if err := store.Authenticate(request.id, "  ALICE ", "alice-password"); err != nil {
 		t.Fatalf("Authenticate() error = %v", err)
+	}
+	if err := store.Authenticate(request.id, "alice", "alice-password"); err == nil {
+		t.Fatal("completed authorization request accepted another authentication")
 	}
 	if !request.done || request.subject != "alice" || !slices.Equal(request.amr, []string{"pwd"}) {
 		t.Fatalf("authentication state = done:%v subject:%q amr:%v", request.done, request.subject, request.amr)
@@ -77,6 +101,38 @@ func TestAuthenticationIntersectsClientAndUserScopes(t *testing.T) {
 	idScopes := client.RestrictAdditionalIdTokenScopes()([]string{"profile", "email", "api.read", "offline_access"})
 	if !slices.Equal(idScopes, []string{"profile", "email"}) {
 		t.Fatalf("additional ID-token scopes = %v", idScopes)
+	}
+}
+
+func TestTokenAudienceSelectionIsRaceSafe(t *testing.T) {
+	request := &AuthRequest{clientID: "react-spa", audience: []string{"hoocloak-api"}}
+	const calls = 32
+	results := make(chan []string, calls)
+	var group sync.WaitGroup
+	for range calls {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			results <- request.GetAudience()
+		}()
+	}
+	group.Wait()
+	close(results)
+
+	resourceAudiences := 0
+	clientAudiences := 0
+	for audience := range results {
+		switch {
+		case slices.Equal(audience, []string{"hoocloak-api"}):
+			resourceAudiences++
+		case slices.Equal(audience, []string{"react-spa"}):
+			clientAudiences++
+		default:
+			t.Fatalf("unexpected audience: %v", audience)
+		}
+	}
+	if resourceAudiences != 1 || clientAudiences != calls-1 {
+		t.Fatalf("audience selection = resource:%d client:%d", resourceAudiences, clientAudiences)
 	}
 }
 

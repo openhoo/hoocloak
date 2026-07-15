@@ -458,6 +458,49 @@ func TestSolidLoginShellAndEmbeddedAssets(t *testing.T) {
 	}
 }
 
+func TestLoginCSRFCookiesAreIsolatedPerAuthorizationRequest(t *testing.T) {
+	server := testServer(t, nil)
+	cookies := make([]*http.Cookie, 0, 2)
+	for _, requestID := range []string{"request-a", "request-b"} {
+		server.Store.authRequests[requestID] = &AuthRequest{
+			id: requestID, clientID: "react-spa", expires: time.Now().Add(5 * time.Minute),
+		}
+		response := performRequest(server.Handler, http.MethodGet, "/login?authRequestID="+requestID, "", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET login for %s = %d", requestID, response.Code)
+		}
+		responseCookies := response.Result().Cookies()
+		if len(responseCookies) != 1 {
+			t.Fatalf("GET login for %s set %d cookies", requestID, len(responseCookies))
+		}
+		cookies = append(cookies, responseCookies[0])
+	}
+	if cookies[0].Name == cookies[1].Name {
+		t.Fatalf("parallel authorization requests shared CSRF cookie %q", cookies[0].Name)
+	}
+	for _, cookie := range cookies {
+		if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/login" {
+			t.Fatalf("unsafe CSRF cookie: %#v", cookie)
+		}
+	}
+
+	form := url.Values{
+		"authRequestID": {"request-a"},
+		"csrf":          {cookies[0].Value},
+		"username":      {"alice"},
+		"password":      {"wrong-password"},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(cookies[0])
+	request.AddCookie(cookies[1])
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("first parallel login POST = %d, body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestExternalLoginThemeSelection(t *testing.T) {
 	themeDir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(themeDir, "assets"), 0o700); err != nil {

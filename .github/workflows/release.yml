@@ -43,11 +43,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      issues: write
-      pull-requests: write
     outputs:
+      commit: ${{ steps.release_commit.outputs.commit }}
       current: ${{ steps.current.outputs.current || steps.manual_current.outputs.current }}
       published: ${{ steps.release.outputs.published }}
+      short_sha: ${{ steps.release_commit.outputs.short_sha }}
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
     steps:
@@ -102,7 +102,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
 
       - name: Release
         id: release
@@ -118,6 +117,17 @@ jobs:
             args+=(--dry-run)
           fi
           bun "$HOOVERSION_DIR/src/cli.ts" "${args[@]}"
+
+      - name: Resolve release commit
+        id: release_commit
+        if: steps.release.outputs.published == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${commit:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Remove Hooversion checkout
         if: always()
@@ -160,8 +170,11 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ needs.release.outputs.version }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.version }}
-            type=sha,prefix=sha-
+            type=raw,value=sha-${{ needs.release.outputs.short_sha }}
             type=raw,value=latest
+          labels: |
+            org.opencontainers.image.revision=${{ needs.release.outputs.commit }}
+            org.opencontainers.image.version=${{ needs.release.outputs.version }}
 
       - name: Build and push image
         id: push
@@ -172,7 +185,7 @@ jobs:
           cache-to: type=gha,mode=max
           context: .
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           provenance: true
           push: true
           tags: ${{ steps.meta.outputs.tags }}

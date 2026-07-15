@@ -59,6 +59,9 @@ func TestLoadRejectsStrictInvalidConfiguration(t *testing.T) {
 		{"whitespace-padded theme directory", func(s string) string {
 			return strings.Replace(s, "listen: 127.0.0.1:8080\n", "listen: 127.0.0.1:8080\nui:\n  theme_dir: \" ./theme\"\n", 1)
 		}, "ui.theme_dir must not have surrounding whitespace"},
+		{"whitespace-padded username", func(s string) string {
+			return strings.Replace(s, "username: Alice", `username: " Alice "`, 1)
+		}, "username must not have surrounding whitespace"},
 		{"non-local cleartext issuer", func(s string) string {
 			return strings.Replace(s, "http://hoocloak.localhost:8080/", "http://id.example.test/", 1)
 		}, "cleartext issuer is allowed only"},
@@ -83,6 +86,13 @@ func TestLoadRejectsStrictInvalidConfiguration(t *testing.T) {
 		{"spa missing openid", func(s string) string {
 			return strings.Replace(s, "[openid, profile, email, offline_access, api.read]", "[profile, email, offline_access, api.read]", 1)
 		}, "spa clients must allow openid"},
+		{"invalid allowed scope token", func(s string) string {
+			return strings.Replace(s, "[openid, profile, email, offline_access, api.read]", "[openid, profile, email, offline_access, api read]", 1)
+		}, "invalid OAuth scope token"},
+		{"invalid permission scope token", func(s string) string {
+			return strings.Replace(s, "permissions: [api.read]\nclients:", `permissions: ["api read"]
+clients:`, 1)
+		}, "invalid OAuth scope token"},
 		{"service browser redirect", func(s string) string {
 			return strings.Replace(s, "    type: service\n", "    type: service\n    redirect_uris: [http://app.localhost:5173/callback]\n", 1)
 		}, "service clients must not define browser redirects or origins"},

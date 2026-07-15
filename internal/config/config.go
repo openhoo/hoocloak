@@ -92,6 +92,7 @@ type Client struct {
 }
 
 func Load(path string) (Config, error) {
+	// #nosec G304 -- the path is an explicit CLI input, not a server-controlled filename.
 	file, err := os.Open(path)
 	if err != nil {
 		return Config{}, err
@@ -156,6 +157,9 @@ func (c Config) Validate() error {
 		if username == "" {
 			return fmt.Errorf("%s.username is required", where)
 		}
+		if user.Username != strings.TrimSpace(user.Username) {
+			return fmt.Errorf("%s.username must not have surrounding whitespace", where)
+		}
 		if _, exists := usernames[username]; exists {
 			return fmt.Errorf("duplicate username %q", user.Username)
 		}
@@ -187,6 +191,9 @@ func (c Config) Validate() error {
 				return err
 			}
 			return fmt.Errorf("%s.allowed_scopes must not be empty", where)
+		}
+		if err := validateScopeTokens(client.AllowedScopes, where+".allowed_scopes"); err != nil {
+			return err
 		}
 		for _, scope := range client.AllowedScopes {
 			if scope == "phone" || scope == "address" {
@@ -286,6 +293,18 @@ func validatePermissions(values []string, where string) error {
 	for _, value := range values {
 		if reservedScopes[value] {
 			return fmt.Errorf("%s contains reserved OIDC scope %q", where, value)
+		}
+	}
+	return validateScopeTokens(values, where)
+}
+
+func validateScopeTokens(values []string, where string) error {
+	for _, value := range values {
+		for index := 0; index < len(value); index++ {
+			character := value[index]
+			if character < 0x21 || character > 0x7e || character == '"' || character == '\\' {
+				return fmt.Errorf("%s contains invalid OAuth scope token %q", where, value)
+			}
 		}
 	}
 	return nil
