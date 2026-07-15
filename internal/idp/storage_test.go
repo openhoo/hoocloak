@@ -3,6 +3,7 @@ package idp
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -26,6 +27,41 @@ func (c *fakeClock) Advance(duration time.Duration) {
 func newTestStore(t *testing.T, clock Clock) *Store {
 	t.Helper()
 	return NewStore(testConfig(t), nil, "test-kid", clock)
+}
+
+func BenchmarkAuthRequestByIDWithActiveState(b *testing.B) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := NewStore(testConfig(b), nil, "test-kid", clock)
+	const requestCount = 10_000
+	for i := range requestCount {
+		id := fmt.Sprintf("request-%d", i)
+		store.authRequests[id] = &AuthRequest{id: id, expires: clock.Now().Add(5 * time.Minute)}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := store.AuthRequestByID(context.Background(), "request-5000"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRevokeFamilyWithManyFamilies(b *testing.B) {
+	store := NewStore(testConfig(b), nil, "test-kid", nil)
+	const familyCount = 10_000
+	for i := range familyCount {
+		familyID := fmt.Sprintf("family-%d", i)
+		hash := sha256.Sum256([]byte(familyID))
+		store.families[familyID] = &refreshFamily{id: familyID, tokens: [][32]byte{hash}}
+		store.refresh[hash] = &refreshRecord{hash: hash, familyID: familyID}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		store.revokeFamilyLocked("family-5000")
+	}
 }
 
 func TestAuthorizationCodeIsConsumedExactlyOnce(t *testing.T) {

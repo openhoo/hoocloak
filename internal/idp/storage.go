@@ -44,9 +44,12 @@ type systemClock struct{}
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 type Store struct {
-	mu           sync.Mutex
-	cfg          config.Config
-	clock        Clock
+	mu    sync.Mutex
+	cfg   config.Config
+	clock Clock
+	// nextExpiry avoids scanning every token map while all records are active.
+	// Early deletions may leave it earlier than necessary, which is safe.
+	nextExpiry   time.Time
 	clients      map[string]*Client
 	users        map[string]config.User
 	usernames    map[string]string
@@ -82,6 +85,8 @@ type refreshFamily struct {
 	id, clientID, subject string
 	expires               time.Time
 	revoked               bool
+	// tokens is the family's refresh-token index used by revoke and expiry cleanup.
+	tokens [][32]byte
 }
 
 type signingKey struct {
@@ -130,32 +135,62 @@ func randomID() (string, error) {
 }
 
 func (s *Store) now() time.Time { return s.clock.Now().UTC() }
+
+func (s *Store) scheduleExpiryLocked(expires time.Time) {
+	if expires.IsZero() {
+		return
+	}
+	if s.nextExpiry.IsZero() || expires.Before(s.nextExpiry) {
+		s.nextExpiry = expires
+	}
+}
+
 func (s *Store) pruneLocked(now time.Time) {
+	if !s.nextExpiry.IsZero() && now.Before(s.nextExpiry) {
+		return
+	}
+
+	nextExpiry := time.Time{}
+	consider := func(expires time.Time) {
+		if !expires.IsZero() && (nextExpiry.IsZero() || expires.Before(nextExpiry)) {
+			nextExpiry = expires
+		}
+	}
 	for id, request := range s.authRequests {
 		if !now.Before(request.expires) {
 			delete(s.authRequests, id)
+			if request.code != "" {
+				delete(s.codes, request.code)
+			}
+			continue
 		}
+		consider(request.expires)
 	}
 	for code, record := range s.codes {
 		if !now.Before(record.expires) {
 			delete(s.codes, code)
+			continue
 		}
+		consider(record.expires)
 	}
 	for id, record := range s.access {
 		if !now.Before(record.expires) {
 			delete(s.access, id)
+			continue
 		}
+		consider(record.expires)
 	}
 	for id, family := range s.families {
 		if !now.Before(family.expires) {
 			delete(s.families, id)
-			for hash, record := range s.refresh {
-				if record.familyID == id {
-					delete(s.refresh, hash)
-				}
+			for _, hash := range family.tokens {
+				delete(s.refresh, hash)
 			}
+			continue
 		}
+		consider(family.expires)
 	}
+	s.nextExpiry = nextExpiry
 }
 
 func (s *Store) CreateAuthRequest(_ context.Context, request *oidc.AuthRequest, userID string) (op.AuthRequest, error) {
@@ -185,6 +220,7 @@ func (s *Store) CreateAuthRequest(_ context.Context, request *oidc.AuthRequest, 
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
 	s.authRequests[id] = auth
+	s.scheduleExpiryLocked(auth.expires)
 	return auth, nil
 }
 
@@ -230,19 +266,19 @@ func (s *Store) SaveAuthCode(_ context.Context, requestID, code string) error {
 		return oidc.ErrInvalidGrant()
 	}
 	request.codeSaved = true
+	request.code = code
 	s.codes[code] = codeRecord{requestID: requestID, expires: request.expires}
+	s.scheduleExpiryLocked(request.expires)
 	return nil
 }
 
 func (s *Store) DeleteAuthRequest(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.authRequests, id)
-	for code, record := range s.codes {
-		if record.requestID == id {
-			delete(s.codes, code)
-		}
+	if request := s.authRequests[id]; request != nil && request.code != "" {
+		delete(s.codes, request.code)
 	}
+	delete(s.authRequests, id)
 	return nil
 }
 
@@ -345,6 +381,7 @@ func (s *Store) createAccessToken(request op.TokenRequest, familyID string) (str
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
 	s.access[id] = record
+	s.scheduleExpiryLocked(expires)
 	return id, expires, nil
 }
 
@@ -374,8 +411,12 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 		if e != nil {
 			return "", "", time.Time{}, e
 		}
-		family = &refreshFamily{id: familyID, clientID: clientID, subject: request.GetSubject(), expires: now.Add(s.cfg.Tokens.RefreshTTL.Duration)}
+		family = &refreshFamily{
+			id: familyID, clientID: clientID, subject: request.GetSubject(),
+			expires: now.Add(s.cfg.Tokens.RefreshTTL.Duration),
+		}
 		s.families[familyID] = family
+		s.scheduleExpiryLocked(family.expires)
 	} else {
 		oldHash := sha256.Sum256([]byte(current))
 		old := s.refresh[oldHash]
@@ -394,8 +435,10 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 	}
 	audience := slices.Clone(s.clients[clientID].config.Audiences)
 	record := &refreshRecord{hash: newHash, familyID: family.id, clientID: clientID, subject: request.GetSubject(), audience: audience, scopes: slices.Clone(request.GetScopes()), amr: slices.Clone(amr), authTime: authTime, accessID: accessID}
+	family.tokens = append(family.tokens, newHash)
 	s.refresh[newHash] = record
 	s.access[accessID] = accessRecord{id: accessID, clientID: clientID, subject: request.GetSubject(), audience: slices.Clone(audience), scopes: slices.Clone(request.GetScopes()), expires: expires, issuedAt: now, authTime: authTime, amr: slices.Clone(amr), familyID: family.id}
+	s.scheduleExpiryLocked(expires)
 	return accessID, newToken, expires, nil
 }
 
@@ -421,14 +464,18 @@ func (s *Store) TokenRequestByRefreshToken(_ context.Context, token string) (op.
 }
 
 func (s *Store) revokeFamilyLocked(id string) {
-	if family := s.families[id]; family != nil {
-		family.revoked = true
+	family := s.families[id]
+	if family == nil {
+		return
 	}
-	for _, record := range s.refresh {
-		if record.familyID == id {
-			record.consumed = true
-			delete(s.access, record.accessID)
+	family.revoked = true
+	for _, hash := range family.tokens {
+		record := s.refresh[hash]
+		if record == nil {
+			continue
 		}
+		record.consumed = true
+		delete(s.access, record.accessID)
 	}
 }
 
@@ -439,18 +486,22 @@ func (s *Store) TerminateSession(_ context.Context, userID, clientID string) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(s.now())
+	families := make(map[string]struct{})
 	for id, record := range s.access {
 		if record.subject == userID && record.clientID == clientID {
 			delete(s.access, id)
 			if record.familyID != "" {
-				s.revokeFamilyLocked(record.familyID)
+				families[record.familyID] = struct{}{}
 			}
 		}
 	}
 	for id, family := range s.families {
 		if family.subject == userID && family.clientID == clientID {
-			s.revokeFamilyLocked(id)
+			families[id] = struct{}{}
 		}
+	}
+	for id := range families {
+		s.revokeFamilyLocked(id)
 	}
 	return nil
 }
@@ -544,9 +595,7 @@ func (s *Store) SetUserinfoFromScopes(context.Context, *oidc.UserInfo, string, s
 	return nil
 }
 func (s *Store) SetUserinfoFromRequest(_ context.Context, info *oidc.UserInfo, request op.IDTokenRequest, scopes []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.setUserinfoLocked(info, request.GetSubject(), scopes)
+	return s.setUserinfo(info, request.GetSubject(), scopes)
 }
 func (s *Store) SetUserinfoFromToken(_ context.Context, info *oidc.UserInfo, tokenID, subject, origin string) error {
 	s.mu.Lock()
@@ -562,9 +611,9 @@ func (s *Store) SetUserinfoFromToken(_ context.Context, info *oidc.UserInfo, tok
 			return errors.New("invalid_token")
 		}
 	}
-	return s.setUserinfoLocked(info, record.subject, record.scopes)
+	return s.setUserinfo(info, record.subject, record.scopes)
 }
-func (s *Store) setUserinfoLocked(info *oidc.UserInfo, subject string, scopes []string) error {
+func (s *Store) setUserinfo(info *oidc.UserInfo, subject string, scopes []string) error {
 	user, ok := s.users[subject]
 	if !ok {
 		return errors.New("user not found")
@@ -646,6 +695,7 @@ func (s *Store) Health(context.Context) error { return nil }
 type AuthRequest struct {
 	mu                                               sync.Mutex
 	id, clientID, redirectURI, state, nonce, subject string
+	code                                             string
 	codeChallenge                                    *oidc.CodeChallenge
 	scopes, audience, amr                            []string
 	responseType                                     oidc.ResponseType

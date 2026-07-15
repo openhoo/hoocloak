@@ -29,7 +29,7 @@ var (
 	testUserHash   string
 )
 
-func testConfig(t *testing.T) config.Config {
+func testConfig(t testing.TB) config.Config {
 	t.Helper()
 	testHashesOnce.Do(func() {
 		secretHash, err := bcrypt.GenerateFromPassword([]byte("worker-secret"), bcrypt.DefaultCost)
@@ -77,12 +77,12 @@ func testConfig(t *testing.T) config.Config {
 	return cfg
 }
 
-func testServer(t *testing.T, clock Clock) *Server {
+func testServer(t testing.TB, clock Clock) *Server {
 	t.Helper()
 	return testServerWithConfig(t, testConfig(t), clock)
 }
 
-func testServerWithConfig(t *testing.T, cfg config.Config, clock Clock) *Server {
+func testServerWithConfig(t testing.TB, cfg config.Config, clock Clock) *Server {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -93,6 +93,16 @@ func testServerWithConfig(t *testing.T, cfg config.Config, clock Clock) *Server 
 		t.Fatalf("NewServer() error = %v", err)
 	}
 	return server
+}
+
+func BenchmarkDiscovery(b *testing.B) {
+	server := testServer(b, nil)
+	request := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		server.Handler.ServeHTTP(httptest.NewRecorder(), request)
+	}
 }
 
 func performRequest(handler http.Handler, method, target, body string, headers map[string]string) *httptest.ResponseRecorder {

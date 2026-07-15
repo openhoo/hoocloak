@@ -185,10 +185,28 @@ jobs:
           cache-to: type=gha,mode=max
           context: .
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,compression=zstd,compression-level=19,force-compression=true
           platforms: linux/amd64,linux/arm64
           provenance: true
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Verify compressed platform images
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          INDEX_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mapfile -t manifests < <(
+            docker buildx imagetools inspect --raw "${IMAGE}@${INDEX_DIGEST}" |
+              jq -r '.manifests[] | select(.platform.os == "linux") | .digest'
+          )
+          test "${#manifests[@]}" -eq 2
+          for manifest in "${manifests[@]}"; do
+            details="$(docker buildx imagetools inspect --raw "${IMAGE}@${manifest}")"
+            jq -e 'all(.layers[]; .mediaType == "application/vnd.oci.image.layer.v1.tar+zstd")' <<<"${details}"
+            size="$(jq '[.layers[].size] | add' <<<"${details}")"
+            test "${size}" -le 6291456
+          done
 
       - name: Generate artifact attestation
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4

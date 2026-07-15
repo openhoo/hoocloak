@@ -59,6 +59,7 @@ type Server struct {
 	secureCookies bool
 	uiTemplates   *template.Template
 	uiAssets      fs.FS
+	discoveryJSON []byte
 }
 
 func NewServer(cfg config.Config, key *rsa.PrivateKey, kid string, logger *slog.Logger, clock Clock) (*Server, error) {
@@ -86,11 +87,16 @@ func NewServer(cfg config.Config, key *rsa.PrivateKey, kid string, logger *slog.
 	if err != nil {
 		return nil, fmtError("create OIDC provider", err)
 	}
+	discoveryJSON, err := json.Marshal(discoveryMetadata(cfg, scopes))
+	if err != nil {
+		return nil, fmtError("encode OIDC discovery document", err)
+	}
+	discoveryJSON = append(discoveryJSON, '\n')
 
 	s := &Server{
 		Provider: provider, Store: store, cfg: cfg,
 		secureCookies: strings.HasPrefix(cfg.Issuer, "https://"),
-		uiTemplates:   uiTemplates, uiAssets: uiAssets,
+		uiTemplates:   uiTemplates, uiAssets: uiAssets, discoveryJSON: discoveryJSON,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", s.discovery)
@@ -201,23 +207,27 @@ func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	endpoint := func(path string) string { return s.cfg.Issuer + strings.TrimPrefix(path, "/") }
-	metadata := map[string]any{
-		"issuer": s.cfg.Issuer, "authorization_endpoint": endpoint("/authorize"), "token_endpoint": endpoint("/oauth/token"),
-		"introspection_endpoint": endpoint("/oauth/introspect"), "userinfo_endpoint": endpoint("/userinfo"),
-		"revocation_endpoint": endpoint("/revoke"), "end_session_endpoint": endpoint("/end_session"), "jwks_uri": endpoint("/keys"),
-		"scopes_supported": configuredScopes(s.cfg), "response_types_supported": []string{"code"}, "response_modes_supported": []string{"query"},
-		"grant_types_supported": []string{"authorization_code", "refresh_token", "client_credentials"}, "subject_types_supported": []string{"public"},
-		"id_token_signing_alg_values_supported": []string{"RS256"}, "token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic"},
-		"revocation_endpoint_auth_methods_supported": []string{"none", "client_secret_basic"}, "introspection_endpoint_auth_methods_supported": []string{"client_secret_basic"},
-		"code_challenge_methods_supported": []string{"S256"}, "claims_supported": slices.Clone(supportedClaims),
-	}
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(metadata)
+	_, _ = w.Write(s.discoveryJSON)
+}
+
+func discoveryMetadata(cfg config.Config, scopes []string) map[string]any {
+	endpoint := func(path string) string { return cfg.Issuer + strings.TrimPrefix(path, "/") }
+	metadata := map[string]any{
+		"issuer": cfg.Issuer, "authorization_endpoint": endpoint("/authorize"), "token_endpoint": endpoint("/oauth/token"),
+		"introspection_endpoint": endpoint("/oauth/introspect"), "userinfo_endpoint": endpoint("/userinfo"),
+		"revocation_endpoint": endpoint("/revoke"), "end_session_endpoint": endpoint("/end_session"), "jwks_uri": endpoint("/keys"),
+		"scopes_supported": slices.Clone(scopes), "response_types_supported": []string{"code"}, "response_modes_supported": []string{"query"},
+		"grant_types_supported": []string{"authorization_code", "refresh_token", "client_credentials"}, "subject_types_supported": []string{"public"},
+		"id_token_signing_alg_values_supported": []string{"RS256"}, "token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic"},
+		"revocation_endpoint_auth_methods_supported": []string{"none", "client_secret_basic"}, "introspection_endpoint_auth_methods_supported": []string{"client_secret_basic"},
+		"code_challenge_methods_supported": []string{"S256"}, "claims_supported": slices.Clone(supportedClaims),
+	}
+	return metadata
 }
 
 func (s *Server) protocolGates(next http.Handler) http.Handler {
