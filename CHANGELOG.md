@@ -1,5 +1,16 @@
 # hoocloak Changelog
 
+## 0.1.1 (2026-07-15)
+
+### Other Changes
+
+- allow artifact metadata records (e610761)
+
+### Bug Fixes
+
+- harden authentication and container releases (682523e)
+- **ci:** use patched Go toolchain (8296017)
+
 ## 0.1.0 (2026-07-15)
 
 ### Features
@@ -10,5 +21,3 @@
 
 - automate releases with Hooversion (dbd1114)
 - use hosted runners for releases (791fd80)
-
-
