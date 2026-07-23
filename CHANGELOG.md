@@ -1,5 +1,16 @@
 # hoocloak Changelog
 
+## 2.0.0 (2026-07-23)
+
+### Other Changes
+
+- align documentation with implementation (6f1ec91)
+
+### Breaking Changes
+
+- **helm:** deliver themes from OCI images (21396a4)
+  - BREAKING: remove theme.existingClaim and theme.readOnly. Migrate PVC contents to theme.image.reference and reset retained Helm values when upgrading.
+
 ## Unreleased
 
 ### Features
