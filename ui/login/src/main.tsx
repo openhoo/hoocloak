@@ -10,6 +10,7 @@ type LoginIdentity = {
 };
 
 type LoginData = {
+  basePath: string;
   requestId: string;
   client: string;
   csrf: string;
@@ -21,8 +22,13 @@ type LoginData = {
 };
 
 function readLoginData(root: HTMLDivElement): LoginData {
+  const basePath = root.dataset.basePath ?? "";
+  if (!/^\/realms\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(basePath)) {
+    throw new Error("Invalid realm base path");
+  }
   const identities = JSON.parse(root.dataset.identities ?? "[]") as LoginIdentity[];
   return {
+    basePath,
     requestId: root.dataset.requestId ?? "",
     client: root.dataset.client ?? "",
     csrf: root.dataset.csrf ?? "",
@@ -58,7 +64,7 @@ function LoginCard(props: LoginData) {
           </div>
         </Show>
 
-        <form method="post" action="/login">
+        <form method="post" action={`${props.basePath}/login`}>
           <input type="hidden" name="authRequestID" value={props.requestId} />
           <input type="hidden" name="csrf" value={props.csrf} />
 

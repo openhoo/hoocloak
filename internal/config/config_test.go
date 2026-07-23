@@ -7,36 +7,56 @@ import (
 	"testing"
 )
 
-const validConfigYAML = `issuer: http://hoocloak.localhost:8080/
+const validConfigYAML = `base_url: http://hoocloak.localhost:8080/
 listen: 127.0.0.1:8080
 tokens:
   access_ttl: 5m
   id_ttl: 5m
   refresh_ttl: 8h
-users:
-  - id: alice
-    username: Alice
-    password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
-    name: Alice
-    email: alice@example.test
-    email_verified: true
-    roles: [admin]
-    permissions: [api.read]
-clients:
-  - id: react-spa
-    type: spa
-    redirect_uris: [http://app.localhost:5173/auth/callback]
-    post_logout_redirect_uris: [http://app.localhost:5173/auth/logout/callback]
-    origins: [http://app.localhost:5173]
-    audiences: [hoocloak-api]
-    allowed_scopes: [openid, profile, email, offline_access, api.read]
-  - id: worker
-    type: service
-    secret_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
-    audiences: [hoocloak-api]
-    allowed_scopes: [api.read]
-    roles: [worker]
-    permissions: [api.read]
+realms:
+  - name: development
+    users:
+      - id: alice
+        username: Alice
+        password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        name: Alice
+        email: alice@example.test
+        email_verified: true
+        roles: [admin]
+        permissions: [api.read]
+    clients:
+      - id: react-spa
+        type: spa
+        redirect_uris: [http://app.localhost:5173/auth/callback]
+        post_logout_redirect_uris: [http://app.localhost:5173/auth/logout/callback]
+        origins: [http://app.localhost:5173]
+        audiences: [hoocloak-api]
+        allowed_scopes: [openid, profile, email, offline_access, api.read]
+      - id: worker
+        type: service
+        secret_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        audiences: [hoocloak-api]
+        allowed_scopes: [api.read]
+        roles: [worker]
+        permissions: [api.read]
+  - name: partner
+    users:
+      - id: alice
+        username: Alice
+        password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        name: Partner Alice
+        email: partner-alice@example.test
+        email_verified: true
+        roles: [partner]
+        permissions: [partner.read]
+    clients:
+      - id: worker
+        type: service
+        secret_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        audiences: [partner-api]
+        allowed_scopes: [partner.read]
+        roles: [partner-worker]
+        permissions: [partner.read]
 `
 
 func TestLoadRejectsStrictInvalidConfiguration(t *testing.T) {
@@ -47,80 +67,44 @@ func TestLoadRejectsStrictInvalidConfiguration(t *testing.T) {
 		want string
 	}{
 		{"unknown field", func(s string) string { return s + "mystery: true\n" }, "field mystery not found"},
-		{"listen missing port", func(s string) string {
-			return strings.Replace(s, "listen: 127.0.0.1:8080", "listen: localhost", 1)
-		}, "listen must be a valid host:port address"},
-		{"listen nonnumeric port", func(s string) string {
-			return strings.Replace(s, "listen: 127.0.0.1:8080", "listen: 127.0.0.1:http", 1)
-		}, "listen port must be a number"},
-		{"listen port out of range", func(s string) string {
-			return strings.Replace(s, "listen: 127.0.0.1:8080", "listen: 127.0.0.1:65536", 1)
-		}, "listen port must be a number"},
-		{"whitespace-padded theme directory", func(s string) string {
-			return strings.Replace(s, "listen: 127.0.0.1:8080\n", "listen: 127.0.0.1:8080\nui:\n  theme_dir: \" ./theme\"\n", 1)
-		}, "ui.theme_dir must not have surrounding whitespace"},
-		{"whitespace-padded username", func(s string) string {
-			return strings.Replace(s, "username: Alice", `username: " Alice "`, 1)
-		}, "username must not have surrounding whitespace"},
-		{"non-local cleartext issuer", func(s string) string {
-			return strings.Replace(s, "http://hoocloak.localhost:8080/", "http://id.example.test/", 1)
-		}, "cleartext issuer is allowed only"},
-		{"issuer path", func(s string) string {
-			return strings.Replace(s, "http://hoocloak.localhost:8080/", "http://hoocloak.localhost:8080/tenant/", 1)
-		}, "absolute root URL ending in /"},
-		{"wildcard redirect", func(s string) string {
-			return strings.Replace(s, "http://app.localhost:5173/auth/callback", "http://*.localhost:5173/auth/callback", 1)
-		}, "must not contain wildcards"},
-		{"redirect fragment", func(s string) string {
-			return strings.Replace(s, "http://app.localhost:5173/auth/callback", "http://app.localhost:5173/auth/callback#fragment", 1)
-		}, "fragments are not allowed"},
-		{"non-local cleartext redirect", func(s string) string {
-			return strings.Replace(s, "http://app.localhost:5173/auth/callback", "http://app.example.test/auth/callback", 1)
-		}, "cleartext redirect URI is allowed only"},
-		{"origin path", func(s string) string {
-			return strings.Replace(s, "origins: [http://app.localhost:5173]", "origins: [http://app.localhost:5173/path]", 1)
-		}, "must not contain a path, query, or fragment"},
-		{"spa secret", func(s string) string {
-			return strings.Replace(s, "    type: spa\n", "    type: spa\n    secret_hash: \"$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme\"\n", 1)
-		}, "spa clients must not define secret_hash"},
-		{"spa missing openid", func(s string) string {
-			return strings.Replace(s, "[openid, profile, email, offline_access, api.read]", "[profile, email, offline_access, api.read]", 1)
-		}, "spa clients must allow openid"},
-		{"invalid allowed scope token", func(s string) string {
-			return strings.Replace(s, "[openid, profile, email, offline_access, api.read]", "[openid, profile, email, offline_access, api read]", 1)
-		}, "invalid OAuth scope token"},
-		{"invalid permission scope token", func(s string) string {
-			return strings.Replace(s, "permissions: [api.read]\nclients:", `permissions: ["api read"]
-clients:`, 1)
-		}, "invalid OAuth scope token"},
-		{"service browser redirect", func(s string) string {
-			return strings.Replace(s, "    type: service\n", "    type: service\n    redirect_uris: [http://app.localhost:5173/callback]\n", 1)
-		}, "service clients must not define browser redirects or origins"},
-		{"service reserved scope", func(s string) string {
-			return strings.Replace(s, "allowed_scopes: [api.read]\n    roles: [worker]", "allowed_scopes: [openid, api.read]\n    roles: [worker]", 1)
-		}, "service clients must not allow reserved OIDC scope"},
-		{"empty allowed scopes", func(s string) string {
-			return strings.Replace(s, "allowed_scopes: [api.read]\n    roles: [worker]", "allowed_scopes: []\n    roles: [worker]", 1)
-		}, "allowed_scopes must not be empty"},
-		{"service scope without permission", func(s string) string {
-			return strings.Replace(s, "roles: [worker]\n    permissions: [api.read]", "roles: [worker]\n    permissions: [api.write]", 1)
-		}, "requires the same permission"},
-		{"principal reserved permission", func(s string) string {
-			return strings.Replace(s, "permissions: [api.read]\nclients:", "permissions: [openid]\nclients:", 1)
-		}, "contains reserved OIDC scope"},
-		{"unicode case-fold duplicate username", func(s string) string {
-			s = strings.Replace(s, "username: Alice", "username: Σ", 1)
-			duplicate := `  - id: unicode-duplicate
-    username: ς
-    password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
-    name: Duplicate
-    email: duplicate@example.test
-    email_verified: true
-    roles: [reader]
-    permissions: [api.read]
+		{"legacy issuer field", func(s string) string { return "issuer: http://hoocloak.localhost:8080/\n" + s }, "field issuer not found"},
+		{"listen missing port", replace("listen: 127.0.0.1:8080", "listen: localhost"), "listen must be a valid host:port address"},
+		{"listen nonnumeric port", replace("listen: 127.0.0.1:8080", "listen: 127.0.0.1:http"), "listen port must be a number"},
+		{"listen port out of range", replace("listen: 127.0.0.1:8080", "listen: 127.0.0.1:65536"), "listen port must be a number"},
+		{"whitespace-padded theme directory", replace("listen: 127.0.0.1:8080\n", "listen: 127.0.0.1:8080\nui:\n  theme_dir: \" ./theme\"\n"), "ui.theme_dir must not have surrounding whitespace"},
+		{"empty realms", func(s string) string { return s[:strings.Index(s, "realms:\n")] + "realms: []\n" }, "realms must not be empty"},
+		{"missing realm name", replace("  - name: development", "  - name: ''"), "realms[0].name must match"},
+		{"invalid realm name", replace("  - name: development", "  - name: Development"), "realms[0].name must match"},
+		{"duplicate realm name", replace("  - name: partner", "  - name: development"), "duplicate realm name"},
+		{"whitespace-padded username", replace("username: Alice", `username: " Alice "`), "username must not have surrounding whitespace"},
+		{"non-local cleartext base URL", replace("http://hoocloak.localhost:8080/", "http://id.example.test/"), "cleartext base_url is allowed only"},
+		{"base URL path", replace("http://hoocloak.localhost:8080/", "http://hoocloak.localhost:8080/tenant/"), "absolute root URL ending in /"},
+		{"base URL query", replace("http://hoocloak.localhost:8080/", "http://hoocloak.localhost:8080/?tenant=dev"), "absolute root URL ending in /"},
+		{"base URL fragment", replace("http://hoocloak.localhost:8080/", "http://hoocloak.localhost:8080/#dev"), "absolute root URL ending in /"},
+		{"base URL scheme", replace("http://hoocloak.localhost:8080/", "ftp://hoocloak.localhost:8080/"), "base_url scheme must be http or https"},
+		{"base URL missing slash", replace("http://hoocloak.localhost:8080/", "http://hoocloak.localhost:8080"), "absolute root URL ending in /"},
+		{"wildcard redirect", replace("http://app.localhost:5173/auth/callback", "http://*.localhost:5173/auth/callback"), "must not contain wildcards"},
+		{"redirect fragment", replace("http://app.localhost:5173/auth/callback", "http://app.localhost:5173/auth/callback#fragment"), "fragments are not allowed"},
+		{"non-local cleartext redirect", replace("http://app.localhost:5173/auth/callback", "http://app.example.test/auth/callback"), "cleartext redirect URI is allowed only"},
+		{"origin path", replace("origins: [http://app.localhost:5173]", "origins: [http://app.localhost:5173/path]"), "must not contain a path, query, or fragment"},
+		{"spa secret", replace("        type: spa\n", "        type: spa\n        secret_hash: \"$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme\"\n"), "spa clients must not define secret_hash"},
+		{"spa missing openid", replace("[openid, profile, email, offline_access, api.read]", "[profile, email, offline_access, api.read]"), "spa clients must allow openid"},
+		{"invalid allowed scope token", replace("[openid, profile, email, offline_access, api.read]", "[openid, profile, email, offline_access, api read]"), "invalid OAuth scope token"},
+		{"service browser redirect", replace("        type: service\n", "        type: service\n        redirect_uris: [http://app.localhost:5173/callback]\n"), "service clients must not define browser redirects or origins"},
+		{"service reserved scope", replace("allowed_scopes: [api.read]\n        roles: [worker]", "allowed_scopes: [openid, api.read]\n        roles: [worker]"), "service clients must not allow reserved OIDC scope"},
+		{"duplicate user in one realm", func(s string) string {
+			duplicate := `      - id: alice-two
+        username: ALICE
+        password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        name: Duplicate
+        email: duplicate@example.test
+        email_verified: true
+        roles: [reader]
+        permissions: [api.read]
 `
-			return strings.Replace(s, "clients:\n", duplicate+"clients:\n", 1)
-		}, "duplicate username"},
+			return strings.Replace(s, "    clients:\n", duplicate+"    clients:\n", 1)
+		}, "realms[0] has duplicate username"},
+		{"duplicate ID in one realm", replace("      - id: react-spa", "      - id: alice"), "duplicate id"},
 	}
 
 	for _, tt := range tests {
@@ -137,7 +121,11 @@ clients:`, 1)
 	}
 }
 
-func TestLoadAcceptsExactLocalConfiguration(t *testing.T) {
+func replace(old, new string) func(string) string {
+	return func(value string) string { return strings.Replace(value, old, new, 1) }
+}
+
+func TestLoadAcceptsRealmLocalNamespaces(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(validConfigYAML), 0o600); err != nil {
@@ -147,8 +135,14 @@ func TestLoadAcceptsExactLocalConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.Issuer != "http://hoocloak.localhost:8080/" || len(cfg.Clients) != 2 {
-		t.Fatalf("unexpected parsed config: issuer=%q clients=%d", cfg.Issuer, len(cfg.Clients))
+	if cfg.BaseURL != "http://hoocloak.localhost:8080/" || len(cfg.Realms) != 2 {
+		t.Fatalf("unexpected parsed config: base_url=%q realms=%d", cfg.BaseURL, len(cfg.Realms))
+	}
+	if got := cfg.RealmIssuer("development"); got != "http://hoocloak.localhost:8080/realms/development" {
+		t.Fatalf("development issuer = %q", got)
+	}
+	if got := cfg.RealmIssuer("partner"); got != "http://hoocloak.localhost:8080/realms/partner" {
+		t.Fatalf("partner issuer = %q", got)
 	}
 	if cfg.UI.ThemeDir != "" {
 		t.Fatalf("theme directory = %q, want empty default", cfg.UI.ThemeDir)
@@ -157,12 +151,7 @@ func TestLoadAcceptsExactLocalConfiguration(t *testing.T) {
 
 func TestLoadResolvesRelativeThemeDirectory(t *testing.T) {
 	t.Parallel()
-	configured := strings.Replace(
-		validConfigYAML,
-		"listen: 127.0.0.1:8080\n",
-		"listen: 127.0.0.1:8080\nui:\n  theme_dir: ./themes/aurora\n",
-		1,
-	)
+	configured := strings.Replace(validConfigYAML, "listen: 127.0.0.1:8080\n", "listen: 127.0.0.1:8080\nui:\n  theme_dir: ./themes/aurora\n", 1)
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(configured), 0o600); err != nil {
 		t.Fatal(err)

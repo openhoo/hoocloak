@@ -44,9 +44,9 @@ type systemClock struct{}
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 type Store struct {
-	mu    sync.Mutex
-	cfg   config.Config
-	clock Clock
+	mu     sync.Mutex
+	tokens config.TokenConfig
+	clock  Clock
 	// nextExpiry avoids scanning every token map while all records are active.
 	// Early deletions may leave it earlier than necessary, which is safe.
 	nextExpiry   time.Time
@@ -104,24 +104,24 @@ func (k *publicKey) Algorithm() jose.SignatureAlgorithm { return jose.RS256 }
 func (k *publicKey) Use() string                        { return "sig" }
 func (k *publicKey) Key() any                           { return &k.signingKey.key.PublicKey }
 
-func NewStore(cfg config.Config, key *rsa.PrivateKey, kid string, clock Clock) *Store {
+func NewStore(realm config.Realm, tokens config.TokenConfig, basePath string, key *rsa.PrivateKey, kid string, clock Clock) *Store {
 	if clock == nil {
 		clock = systemClock{}
 	}
 	s := &Store{
-		cfg: cfg, clock: clock,
-		clients: make(map[string]*Client, len(cfg.Clients)), users: make(map[string]config.User, len(cfg.Users)),
-		usernames: make(map[string]string, len(cfg.Users)), authRequests: make(map[string]*AuthRequest),
+		tokens: tokens, clock: clock,
+		clients: make(map[string]*Client, len(realm.Clients)), users: make(map[string]config.User, len(realm.Users)),
+		usernames: make(map[string]string, len(realm.Users)), authRequests: make(map[string]*AuthRequest),
 		codes: make(map[string]codeRecord), access: make(map[string]accessRecord),
 		refresh: make(map[[32]byte]*refreshRecord), families: make(map[string]*refreshFamily),
 		signing: signingKey{id: kid, key: key},
 	}
-	for _, c := range cfg.Clients {
-		s.clients[c.ID] = newClient(c, cfg.Tokens.IDTTL.Duration)
+	for _, client := range realm.Clients {
+		s.clients[client.ID] = newClient(client, tokens.IDTTL.Duration, basePath)
 	}
-	for _, u := range cfg.Users {
-		s.users[u.ID] = u
-		s.usernames[config.CanonicalUsername(u.Username)] = u.ID
+	for _, user := range realm.Users {
+		s.users[user.ID] = user
+		s.usernames[config.CanonicalUsername(user.Username)] = user.ID
 	}
 	return s
 }
@@ -385,7 +385,7 @@ func (s *Store) createAccessToken(request op.TokenRequest, familyID string) (str
 		return "", time.Time{}, err
 	}
 	now := s.now()
-	expires := now.Add(s.cfg.Tokens.AccessTTL.Duration)
+	expires := now.Add(s.tokens.AccessTTL.Duration)
 	clientID, authTime, amr, err := tokenRequestInfo(request)
 	if err != nil {
 		return "", time.Time{}, err
@@ -415,7 +415,7 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
-	expires := now.Add(s.cfg.Tokens.AccessTTL.Duration)
+	expires := now.Add(s.tokens.AccessTTL.Duration)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -428,7 +428,7 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 		}
 		family = &refreshFamily{
 			id: familyID, clientID: clientID, subject: request.GetSubject(),
-			expires: now.Add(s.cfg.Tokens.RefreshTTL.Duration),
+			expires: now.Add(s.tokens.RefreshTTL.Duration),
 		}
 		s.families[familyID] = family
 		s.scheduleExpiryLocked(family.expires)

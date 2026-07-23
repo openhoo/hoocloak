@@ -45,32 +45,35 @@ func testConfig(t testing.TB) config.Config {
 		testUserHash = string(userHash)
 	})
 	cfg := config.Config{
-		Issuer: "http://hoocloak.localhost:8080/",
-		Listen: "127.0.0.1:8080",
+		BaseURL: "http://hoocloak.localhost:8080/",
+		Listen:  "127.0.0.1:8080",
 		Tokens: config.TokenConfig{
 			AccessTTL:  config.Duration{Duration: 5 * time.Minute},
 			IDTTL:      config.Duration{Duration: 5 * time.Minute},
 			RefreshTTL: config.Duration{Duration: 8 * time.Hour},
 		},
-		Users: []config.User{{
-			ID: "alice", Username: "alice", PasswordHash: testUserHash,
-			Name: "Alice Admin", Email: "alice@example.test", EmailVerified: true,
-			Roles: []string{"admin"}, Permissions: []string{"api.read"},
+		Realms: []config.Realm{{
+			Name: "development",
+			Users: []config.User{{
+				ID: "alice", Username: "alice", PasswordHash: testUserHash,
+				Name: "Alice Admin", Email: "alice@example.test", EmailVerified: true,
+				Roles: []string{"admin"}, Permissions: []string{"api.read"},
+			}},
+			Clients: []config.Client{
+				{
+					ID: "react-spa", Type: config.ClientTypeSPA, Name: "React SPA",
+					RedirectURIs:           []string{"http://app.localhost:5173/auth/callback"},
+					PostLogoutRedirectURIs: []string{"http://app.localhost:5173/auth/logout/callback"},
+					Origins:                []string{"http://app.localhost:5173"}, Audiences: []string{"hoocloak-api"},
+					AllowedScopes: []string{"openid", "profile", "email", "offline_access", "api.read"},
+				},
+				{
+					ID: "worker", Type: config.ClientTypeService, SecretHash: testSecretHash,
+					Audiences: []string{"hoocloak-api"}, AllowedScopes: []string{"api.read"},
+					Roles: []string{"worker"}, Permissions: []string{"api.read"},
+				},
+			},
 		}},
-		Clients: []config.Client{
-			{
-				ID: "react-spa", Type: config.ClientTypeSPA, Name: "React SPA",
-				RedirectURIs:           []string{"http://app.localhost:5173/auth/callback"},
-				PostLogoutRedirectURIs: []string{"http://app.localhost:5173/auth/logout/callback"},
-				Origins:                []string{"http://app.localhost:5173"}, Audiences: []string{"hoocloak-api"},
-				AllowedScopes: []string{"openid", "profile", "email", "offline_access", "api.read"},
-			},
-			{
-				ID: "worker", Type: config.ClientTypeService, SecretHash: testSecretHash,
-				Audiences: []string{"hoocloak-api"}, AllowedScopes: []string{"api.read"},
-				Roles: []string{"worker"}, Permissions: []string{"api.read"},
-			},
-		},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("test config is invalid: %v", err)
@@ -78,22 +81,34 @@ func testConfig(t testing.TB) config.Config {
 	return cfg
 }
 
-func testServer(t testing.TB, clock Clock) *Server {
+func testServer(t testing.TB, clock Clock) *realmServer {
 	t.Helper()
 	return testServerWithConfig(t, testConfig(t), clock)
 }
 
-func testServerWithConfig(t testing.TB, cfg config.Config, clock Clock) *Server {
+func testServerWithConfig(t testing.TB, cfg config.Config, clock Clock) *realmServer {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(cfg, key, "test-kid", slog.New(slog.NewTextHandler(io.Discard, nil)), clock)
+	application, err := NewServer(cfg, map[string]SigningKey{"development": {Key: key, KID: "test-kid"}}, slog.New(slog.NewTextHandler(io.Discard, nil)), clock)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
-	return server
+	realm := application.realms["development"]
+	realm.Handler = realmPathAdapter(application.Handler, realm.basePath)
+	return realm
+}
+
+func realmPathAdapter(application http.Handler, basePath string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clone := r.Clone(r.Context())
+		urlCopy := *r.URL
+		urlCopy.Path = basePath + r.URL.Path
+		clone.URL = &urlCopy
+		application.ServeHTTP(w, clone)
+	})
 }
 
 func BenchmarkDiscovery(b *testing.B) {
@@ -126,7 +141,7 @@ func TestDiscoveryAdvertisesOnlyImplementedProtocol(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata["issuer"] != "http://hoocloak.localhost:8080/" || metadata["jwks_uri"] != "http://hoocloak.localhost:8080/keys" {
+	if metadata["issuer"] != "http://hoocloak.localhost:8080/realms/development" || metadata["jwks_uri"] != "http://hoocloak.localhost:8080/realms/development/keys" {
 		t.Fatalf("wrong issuer endpoints: %#v", metadata)
 	}
 	assertStrings := func(field string, want []string) {
@@ -358,7 +373,7 @@ func TestServiceTokenIsRS256JWTValidatedByServedJWKS(t *testing.T) {
 	if err := signed.Claims(keys[0].Key, &claims); err != nil {
 		t.Fatalf("verify JWT against served JWKS: %v", err)
 	}
-	if claims.Issuer != "http://hoocloak.localhost:8080/" || claims.Subject != "worker" || claims.ClientID != "worker" {
+	if claims.Issuer != "http://hoocloak.localhost:8080/realms/development" || claims.Subject != "worker" || claims.ClientID != "worker" {
 		t.Fatalf("wrong registered/principal claims: %#v", claims)
 	}
 	if len(claims.Audience) != 1 || claims.Audience[0] != "hoocloak-api" || claims.Scope != "api.read" {
@@ -373,7 +388,7 @@ func TestServiceTokenIsRS256JWTValidatedByServedJWKS(t *testing.T) {
 	if claims.ID == "" || claims.Expiry == nil || claims.IssuedAt == nil || claims.NotBefore == nil {
 		t.Fatalf("missing access-token time/id claims: %#v", claims.Claims)
 	}
-	if err := claims.ValidateWithLeeway(jwt.Expected{Issuer: "http://hoocloak.localhost:8080/", Subject: "worker", Time: time.Now()}, 5*time.Second); err != nil {
+	if err := claims.ValidateWithLeeway(jwt.Expected{Issuer: "http://hoocloak.localhost:8080/realms/development", Subject: "worker", Time: time.Now()}, 5*time.Second); err != nil {
 		t.Fatalf("registered claims validation failed: %v", err)
 	}
 }
@@ -420,6 +435,7 @@ func TestSolidLoginShellAndEmbeddedAssets(t *testing.T) {
 	server := testServer(t, nil)
 	response := httptest.NewRecorder()
 	server.renderLogin(response, http.StatusUnauthorized, loginData{
+		BasePath:  "/realms/development",
 		RequestID: "request-id",
 		Client:    `client"><script>alert(1)</script>`,
 		CSRF:      "csrf-token",
@@ -432,7 +448,7 @@ func TestSolidLoginShellAndEmbeddedAssets(t *testing.T) {
 		`data-request-id="request-id"`,
 		`data-csrf="csrf-token"`,
 		`data-username="alice"`,
-		`src="/assets/login.js"`,
+		`src="/realms/development/assets/login.js"`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Errorf("login shell is missing %q", expected)
@@ -493,7 +509,7 @@ func TestLoginCSRFCookiesAreIsolatedPerAuthorizationRequest(t *testing.T) {
 		t.Fatalf("parallel authorization requests shared CSRF cookie %q", cookies[0].Name)
 	}
 	for _, cookie := range cookies {
-		if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/login" {
+		if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/realms/development/login" {
 			t.Fatalf("unsafe CSRF cookie: %#v", cookie)
 		}
 	}
@@ -555,8 +571,8 @@ func TestExternalLoginThemeSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		"login.html":       `<!doctype html><html lang="en"><head><title>Aurora sign in</title><link rel="stylesheet" href="/assets/theme.css"></head><body><main class="aurora"><h1>Welcome through Aurora</h1><p>{{.Client}}</p>{{if .Error}}<p role="alert">Try again</p>{{end}}<form method="post" action="/login"><input type="hidden" name="authRequestID" value="{{.RequestID}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><input name="username" value="{{.Username}}"><input name="password" type="password"><button>Continue</button></form><script type="module" src="/assets/theme.js"></script></main></body></html>`,
-		"logged-out.html":  `<!doctype html><html lang="en"><head><title>Aurora signed out</title></head><body><p>Session ended</p></body></html>`,
+		"login.html":       `<!doctype html><html lang="en"><head><title>Aurora sign in</title><link rel="stylesheet" href="{{.BasePath}}/assets/theme.css"></head><body><main class="aurora"><h1>Welcome through Aurora</h1><p>{{.Client}}</p>{{if .Error}}<p role="alert">Try again</p>{{end}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID" value="{{.RequestID}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><input name="username" value="{{.Username}}"><input name="password" type="password"><button>Continue</button></form><script type="module" src="{{.BasePath}}/assets/theme.js"></script></main></body></html>`,
+		"logged-out.html":  `<!doctype html><html lang="en"><head><title>Aurora signed out</title><link rel="stylesheet" href="{{.BasePath}}/assets/theme.css"></head><body><p>Session ended</p></body></html>`,
 		"assets/theme.css": `.aurora { color: rebeccapurple; }`,
 		"assets/theme.js":  `document.documentElement.dataset.themeReady = "true";`,
 		"assets/logo.svg":  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><circle r="1"/></svg>`,
@@ -574,6 +590,7 @@ func TestExternalLoginThemeSelection(t *testing.T) {
 
 	response := httptest.NewRecorder()
 	server.renderLogin(response, http.StatusUnauthorized, loginData{
+		BasePath:  "/realms/development",
 		RequestID: "request-id", Client: `client"><script>alert(1)</script>`,
 		CSRF: "csrf-token", Username: "alice", Error: "invalid",
 	})
@@ -617,10 +634,188 @@ func TestExternalLoginThemeSelection(t *testing.T) {
 	}
 }
 
+func TestApplicationRouterAndRealmIsolation(t *testing.T) {
+	cfg := testConfig(t)
+	partnerSecretHash, err := bcrypt.GenerateFromPassword([]byte("partner-secret"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Realms = append(cfg.Realms, config.Realm{
+		Name: "partner",
+		Clients: []config.Client{
+			{
+				ID: "partner-spa", Type: config.ClientTypeSPA,
+				RedirectURIs: []string{"http://partner.localhost:5174/auth/callback"}, Origins: []string{"http://partner.localhost:5174"},
+				Audiences: []string{"partner-api"}, AllowedScopes: []string{"openid", "partner.read"},
+			},
+			{
+				ID: "worker", Type: config.ClientTypeService, SecretHash: string(partnerSecretHash),
+				Audiences: []string{"partner-api"}, AllowedScopes: []string{"partner.read"},
+				Roles: []string{"partner-worker"}, Permissions: []string{"partner.read"},
+			},
+		},
+	})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("multi-realm config is invalid: %v", err)
+	}
+	developmentKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partnerKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application, err := NewServer(cfg, map[string]SigningKey{
+		"development": {Key: developmentKey, KID: "development-kid"},
+		"partner":     {Key: partnerKey, KID: "partner-kid"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, check := range []struct {
+		path   string
+		status int
+	}{
+		{"/healthz", http.StatusOK}, {"/ready", http.StatusOK},
+		{"/.well-known/openid-configuration", http.StatusNotFound}, {"/oauth/token", http.StatusNotFound}, {"/login", http.StatusNotFound}, {"/assets/login.js", http.StatusNotFound},
+		{"/realms/missing/.well-known/openid-configuration", http.StatusNotFound}, {"/realms/development/ready", http.StatusNotFound}, {"/realms/development/healthz", http.StatusNotFound},
+		{"/realms/development", http.StatusPermanentRedirect},
+	} {
+		response := performRequest(application.Handler, http.MethodGet, check.path, "", nil)
+		if response.Code != check.status {
+			t.Errorf("GET %s = %d, want %d", check.path, response.Code, check.status)
+		}
+	}
+
+	developmentDiscovery := performRequest(application.Handler, http.MethodGet, "/realms/development/.well-known/openid-configuration", "", map[string]string{"Origin": "http://app.localhost:5173"})
+	partnerDiscovery := performRequest(application.Handler, http.MethodGet, "/realms/partner/.well-known/openid-configuration", "", map[string]string{"Origin": "http://app.localhost:5173"})
+	if developmentDiscovery.Code != http.StatusOK || partnerDiscovery.Code != http.StatusOK {
+		t.Fatalf("discovery statuses = %d, %d", developmentDiscovery.Code, partnerDiscovery.Code)
+	}
+	if developmentDiscovery.Header().Get("Access-Control-Allow-Origin") != "http://app.localhost:5173" || partnerDiscovery.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("cross-realm CORS leak: development=%q partner=%q", developmentDiscovery.Header().Get("Access-Control-Allow-Origin"), partnerDiscovery.Header().Get("Access-Control-Allow-Origin"))
+	}
+	var developmentMetadata, partnerMetadata map[string]any
+	if err := json.Unmarshal(developmentDiscovery.Body.Bytes(), &developmentMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(partnerDiscovery.Body.Bytes(), &partnerMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if developmentMetadata["issuer"] != cfg.RealmIssuer("development") || partnerMetadata["issuer"] != cfg.RealmIssuer("partner") {
+		t.Fatalf("realm issuers = %#v, %#v", developmentMetadata["issuer"], partnerMetadata["issuer"])
+	}
+
+	requestToken := func(path, secret, scope string) *httptest.ResponseRecorder {
+		form := url.Values{"grant_type": {"client_credentials"}, "scope": {scope}}
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.SetBasicAuth("worker", secret)
+		response := httptest.NewRecorder()
+		application.Handler.ServeHTTP(response, request)
+		return response
+	}
+	developmentToken := requestToken("/realms/development/oauth/token", "worker-secret", "api.read")
+	partnerToken := requestToken("/realms/partner/oauth/token", "partner-secret", "partner.read")
+	wrongRealm := requestToken("/realms/partner/oauth/token", "worker-secret", "partner.read")
+	if developmentToken.Code != http.StatusOK || partnerToken.Code != http.StatusOK || wrongRealm.Code != http.StatusUnauthorized {
+		t.Fatalf("realm token statuses = development %d, partner %d, wrong realm %d", developmentToken.Code, partnerToken.Code, wrongRealm.Code)
+	}
+	var developmentTokens, partnerTokens struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(developmentToken.Body.Bytes(), &developmentTokens); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(partnerToken.Body.Bytes(), &partnerTokens); err != nil {
+		t.Fatal(err)
+	}
+	developmentJWKSResponse := performRequest(application.Handler, http.MethodGet, "/realms/development/keys", "", nil)
+	partnerJWKSResponse := performRequest(application.Handler, http.MethodGet, "/realms/partner/keys", "", nil)
+	var developmentJWKS, partnerJWKS jose.JSONWebKeySet
+	if err := json.Unmarshal(developmentJWKSResponse.Body.Bytes(), &developmentJWKS); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(partnerJWKSResponse.Body.Bytes(), &partnerJWKS); err != nil {
+		t.Fatal(err)
+	}
+	if len(developmentJWKS.Keys) != 1 || len(partnerJWKS.Keys) != 1 || developmentJWKS.Keys[0].KeyID == partnerJWKS.Keys[0].KeyID {
+		t.Fatalf("realm keys are not isolated: development=%#v partner=%#v", developmentJWKS.Keys, partnerJWKS.Keys)
+	}
+	developmentSigned, err := jwt.ParseSigned(developmentTokens.AccessToken, []jose.SignatureAlgorithm{jose.RS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partnerSigned, err := jwt.ParseSigned(partnerTokens.AccessToken, []jose.SignatureAlgorithm{jose.RS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var developmentClaims, partnerClaims jwt.Claims
+	if err := developmentSigned.Claims(developmentJWKS.Keys[0].Key, &developmentClaims); err != nil {
+		t.Fatal(err)
+	}
+	if err := partnerSigned.Claims(partnerJWKS.Keys[0].Key, &partnerClaims); err != nil {
+		t.Fatal(err)
+	}
+	if developmentClaims.Issuer != cfg.RealmIssuer("development") || partnerClaims.Issuer != cfg.RealmIssuer("partner") {
+		t.Fatalf("token issuers = %q, %q", developmentClaims.Issuer, partnerClaims.Issuer)
+	}
+	if err := partnerSigned.Claims(developmentJWKS.Keys[0].Key, &jwt.Claims{}); err == nil {
+		t.Fatal("partner token verified with development JWKS")
+	}
+}
+
+func TestRealmQualifiedLoginCallbackAndAssets(t *testing.T) {
+	server := testServer(t, nil)
+	server.Store.authRequests["request-id"] = &AuthRequest{
+		id: "request-id", clientID: "react-spa", expires: time.Now().Add(5 * time.Minute), scopes: []string{"openid", "api.read"},
+	}
+	page := performRequest(server.Handler, http.MethodGet, "/login?authRequestID=request-id", "", nil)
+	for _, expected := range []string{`data-base-path="/realms/development"`, `href="/realms/development/assets/login.css"`, `src="/realms/development/assets/login.js"`} {
+		if !strings.Contains(page.Body.String(), expected) {
+			t.Errorf("login page missing %q", expected)
+		}
+	}
+	cookies := page.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Path != "/realms/development/login" {
+		t.Fatalf("realm CSRF cookie = %#v", cookies)
+	}
+	form := url.Values{"authRequestID": {"request-id"}, "csrf": {cookies[0].Value}, "username": {"alice"}, "password": {"alice-password"}}
+	request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(cookies[0])
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || !strings.HasPrefix(response.Header().Get("Location"), "http://hoocloak.localhost:8080/realms/development/authorize/callback?id=") {
+		t.Fatalf("login callback = %d %q", response.Code, response.Header().Get("Location"))
+	}
+}
+
 func TestExternalLoginThemeRequiresCompletePackage(t *testing.T) {
 	_, _, err := loadUI(t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "read login.html") {
 		t.Fatalf("loadUI() error = %v, want missing login.html", err)
+	}
+}
+
+func TestExternalLoginThemeRejectsRootRelativeRealmURLs(t *testing.T) {
+	themeDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(themeDir, "assets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{
+		"login.html":      `<!doctype html><link rel="stylesheet" href="/assets/theme.css"><form action="/login"></form>`,
+		"logged-out.html": `<!doctype html><link rel="stylesheet" href="/assets/theme.css">`,
+	} {
+		if err := os.WriteFile(filepath.Join(themeDir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, err := loadUI(themeDir)
+	if err == nil || !strings.Contains(err.Error(), "use .BasePath") {
+		t.Fatalf("loadUI() error = %v, want realm-safe BasePath error", err)
 	}
 }
 

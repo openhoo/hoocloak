@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,13 +36,18 @@ var reservedScopes = map[string]bool{
 }
 
 type Config struct {
-	Issuer    string      `yaml:"issuer"`
+	BaseURL   string      `yaml:"base_url"`
 	Listen    string      `yaml:"listen"`
 	UI        UIConfig    `yaml:"ui,omitempty"`
 	Tokens    TokenConfig `yaml:"tokens"`
-	Users     []User      `yaml:"users"`
-	Clients   []Client    `yaml:"clients"`
+	Realms    []Realm     `yaml:"realms"`
 	LoginMode string      `yaml:"-"`
+}
+
+type Realm struct {
+	Name    string   `yaml:"name"`
+	Users   []User   `yaml:"users"`
+	Clients []Client `yaml:"clients"`
 }
 
 type UIConfig struct {
@@ -128,15 +134,21 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+func (c Config) RealmIssuer(name string) string {
+	return strings.TrimSuffix(c.BaseURL, "/") + "/realms/" + name
+}
+
+var realmNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
 func (c Config) Validate() error {
-	issuer, err := validateAbsoluteURL(c.Issuer, "issuer")
+	baseURL, err := validateAbsoluteURL(c.BaseURL, "base_url")
 	if err != nil {
 		return err
 	}
-	if issuer.Path != "/" || issuer.RawPath != "" || issuer.RawQuery != "" || issuer.Fragment != "" || !strings.HasSuffix(c.Issuer, "/") {
-		return errors.New("issuer must be an absolute root URL ending in /")
+	if baseURL.Path != "/" || baseURL.RawPath != "" || baseURL.RawQuery != "" || baseURL.Fragment != "" || !strings.HasSuffix(c.BaseURL, "/") {
+		return errors.New("base_url must be an absolute root URL ending in /")
 	}
-	if err := validateScheme(issuer, "issuer"); err != nil {
+	if err := validateScheme(baseURL, "base_url"); err != nil {
 		return err
 	}
 	if err := validateListen(c.Listen); err != nil {
@@ -151,106 +163,121 @@ func (c Config) Validate() error {
 	if c.LoginMode != "" && c.LoginMode != LoginModePassword && c.LoginMode != LoginModeSelect {
 		return fmt.Errorf("login mode must be %q or %q", LoginModePassword, LoginModeSelect)
 	}
-
-	ids := make(map[string]string, len(c.Users)+len(c.Clients))
-	usernames := make(map[string]struct{}, len(c.Users))
-	for i, user := range c.Users {
-		where := fmt.Sprintf("users[%d]", i)
-		if err := requireID(user.ID, where, ids); err != nil {
-			return err
-		}
-		username := CanonicalUsername(user.Username)
-		if username == "" {
-			return fmt.Errorf("%s.username is required", where)
-		}
-		if user.Username != strings.TrimSpace(user.Username) {
-			return fmt.Errorf("%s.username must not have surrounding whitespace", where)
-		}
-		if _, exists := usernames[username]; exists {
-			return fmt.Errorf("duplicate username %q", user.Username)
-		}
-		usernames[username] = struct{}{}
-		if err := validBcrypt(user.PasswordHash); err != nil {
-			return fmt.Errorf("%s.password_hash: %w", where, err)
-		}
-		if err := validatePermissions(user.Permissions, where+".permissions"); err != nil {
-			return err
-		}
-		if err := validateNonemptyUnique(user.Roles, where+".roles"); err != nil {
-			return err
-		}
+	if len(c.Realms) == 0 {
+		return errors.New("realms must not be empty")
 	}
 
-	for i, client := range c.Clients {
-		where := fmt.Sprintf("clients[%d]", i)
-		if err := requireID(client.ID, where, ids); err != nil {
-			return err
+	realmNames := make(map[string]struct{}, len(c.Realms))
+	for realmIndex, realm := range c.Realms {
+		realmWhere := fmt.Sprintf("realms[%d]", realmIndex)
+		if !realmNamePattern.MatchString(realm.Name) {
+			return fmt.Errorf("%s.name must match %s", realmWhere, realmNamePattern.String())
 		}
-		if err := validateNonemptyUnique(client.Audiences, where+".audiences"); err != nil || len(client.Audiences) == 0 {
-			if err != nil {
+		if _, exists := realmNames[realm.Name]; exists {
+			return fmt.Errorf("duplicate realm name %q", realm.Name)
+		}
+		realmNames[realm.Name] = struct{}{}
+
+		ids := make(map[string]string, len(realm.Users)+len(realm.Clients))
+		usernames := make(map[string]struct{}, len(realm.Users))
+		for userIndex, user := range realm.Users {
+			where := fmt.Sprintf("%s.users[%d]", realmWhere, userIndex)
+			if err := requireID(user.ID, where, ids); err != nil {
 				return err
 			}
-			return fmt.Errorf("%s.audiences must not be empty", where)
-		}
-		if err := validateNonemptyUnique(client.AllowedScopes, where+".allowed_scopes"); err != nil || len(client.AllowedScopes) == 0 {
-			if err != nil {
+			username := CanonicalUsername(user.Username)
+			if username == "" {
+				return fmt.Errorf("%s.username is required", where)
+			}
+			if user.Username != strings.TrimSpace(user.Username) {
+				return fmt.Errorf("%s.username must not have surrounding whitespace", where)
+			}
+			if _, exists := usernames[username]; exists {
+				return fmt.Errorf("%s has duplicate username %q", realmWhere, user.Username)
+			}
+			usernames[username] = struct{}{}
+			if err := validBcrypt(user.PasswordHash); err != nil {
+				return fmt.Errorf("%s.password_hash: %w", where, err)
+			}
+			if err := validatePermissions(user.Permissions, where+".permissions"); err != nil {
 				return err
 			}
-			return fmt.Errorf("%s.allowed_scopes must not be empty", where)
-		}
-		if err := validateScopeTokens(client.AllowedScopes, where+".allowed_scopes"); err != nil {
-			return err
-		}
-		for _, scope := range client.AllowedScopes {
-			if scope == "phone" || scope == "address" {
-				return fmt.Errorf("%s.allowed_scopes contains unsupported reserved scope %q", where, scope)
+			if err := validateNonemptyUnique(user.Roles, where+".roles"); err != nil {
+				return err
 			}
-		}
-		if err := validatePermissions(client.Permissions, where+".permissions"); err != nil {
-			return err
-		}
-		if err := validateNonemptyUnique(client.Roles, where+".roles"); err != nil {
-			return err
 		}
 
-		switch client.Type {
-		case ClientTypeSPA:
-			if client.SecretHash != "" {
-				return fmt.Errorf("%s: spa clients must not define secret_hash", where)
+		for clientIndex, client := range realm.Clients {
+			where := fmt.Sprintf("%s.clients[%d]", realmWhere, clientIndex)
+			if err := requireID(client.ID, where, ids); err != nil {
+				return err
 			}
-			if !slices.Contains(client.AllowedScopes, "openid") {
-				return fmt.Errorf("%s: spa clients must allow openid", where)
-			}
-			if len(client.RedirectURIs) == 0 || len(client.Origins) == 0 {
-				return fmt.Errorf("%s: spa clients require redirect_uris and origins", where)
-			}
-			for _, raw := range append(append([]string(nil), client.RedirectURIs...), client.PostLogoutRedirectURIs...) {
-				if err := validateRedirect(raw); err != nil {
-					return fmt.Errorf("%s redirect URI %q: %w", where, raw, err)
+			if err := validateNonemptyUnique(client.Audiences, where+".audiences"); err != nil || len(client.Audiences) == 0 {
+				if err != nil {
+					return err
 				}
+				return fmt.Errorf("%s.audiences must not be empty", where)
 			}
-			for _, raw := range client.Origins {
-				if err := validateOrigin(raw); err != nil {
-					return fmt.Errorf("%s origin %q: %w", where, raw, err)
+			if err := validateNonemptyUnique(client.AllowedScopes, where+".allowed_scopes"); err != nil || len(client.AllowedScopes) == 0 {
+				if err != nil {
+					return err
 				}
+				return fmt.Errorf("%s.allowed_scopes must not be empty", where)
 			}
-		case ClientTypeService:
-			if err := validBcrypt(client.SecretHash); err != nil {
-				return fmt.Errorf("%s.secret_hash: %w", where, err)
-			}
-			if len(client.RedirectURIs) != 0 || len(client.PostLogoutRedirectURIs) != 0 || len(client.Origins) != 0 {
-				return fmt.Errorf("%s: service clients must not define browser redirects or origins", where)
+			if err := validateScopeTokens(client.AllowedScopes, where+".allowed_scopes"); err != nil {
+				return err
 			}
 			for _, scope := range client.AllowedScopes {
-				if reservedScopes[scope] {
-					return fmt.Errorf("%s: service clients must not allow reserved OIDC scope %q", where, scope)
-				}
-				if !slices.Contains(client.Permissions, scope) {
-					return fmt.Errorf("%s: service allowed scope %q requires the same permission", where, scope)
+				if scope == "phone" || scope == "address" {
+					return fmt.Errorf("%s.allowed_scopes contains unsupported reserved scope %q", where, scope)
 				}
 			}
-		default:
-			return fmt.Errorf("%s.type must be %q or %q", where, ClientTypeSPA, ClientTypeService)
+			if err := validatePermissions(client.Permissions, where+".permissions"); err != nil {
+				return err
+			}
+			if err := validateNonemptyUnique(client.Roles, where+".roles"); err != nil {
+				return err
+			}
+
+			switch client.Type {
+			case ClientTypeSPA:
+				if client.SecretHash != "" {
+					return fmt.Errorf("%s: spa clients must not define secret_hash", where)
+				}
+				if !slices.Contains(client.AllowedScopes, "openid") {
+					return fmt.Errorf("%s: spa clients must allow openid", where)
+				}
+				if len(client.RedirectURIs) == 0 || len(client.Origins) == 0 {
+					return fmt.Errorf("%s: spa clients require redirect_uris and origins", where)
+				}
+				for _, raw := range append(append([]string(nil), client.RedirectURIs...), client.PostLogoutRedirectURIs...) {
+					if err := validateRedirect(raw); err != nil {
+						return fmt.Errorf("%s redirect URI %q: %w", where, raw, err)
+					}
+				}
+				for _, raw := range client.Origins {
+					if err := validateOrigin(raw); err != nil {
+						return fmt.Errorf("%s origin %q: %w", where, raw, err)
+					}
+				}
+			case ClientTypeService:
+				if err := validBcrypt(client.SecretHash); err != nil {
+					return fmt.Errorf("%s.secret_hash: %w", where, err)
+				}
+				if len(client.RedirectURIs) != 0 || len(client.PostLogoutRedirectURIs) != 0 || len(client.Origins) != 0 {
+					return fmt.Errorf("%s: service clients must not define browser redirects or origins", where)
+				}
+				for _, scope := range client.AllowedScopes {
+					if reservedScopes[scope] {
+						return fmt.Errorf("%s: service clients must not allow reserved OIDC scope %q", where, scope)
+					}
+					if !slices.Contains(client.Permissions, scope) {
+						return fmt.Errorf("%s: service allowed scope %q requires the same permission", where, scope)
+					}
+				}
+			default:
+				return fmt.Errorf("%s.type must be %q or %q", where, ClientTypeSPA, ClientTypeService)
+			}
 		}
 	}
 	return nil

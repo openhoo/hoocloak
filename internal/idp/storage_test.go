@@ -26,12 +26,14 @@ func (c *fakeClock) Advance(duration time.Duration) {
 
 func newTestStore(t *testing.T, clock Clock) *Store {
 	t.Helper()
-	return NewStore(testConfig(t), nil, "test-kid", clock)
+	cfg := testConfig(t)
+	return NewStore(cfg.Realms[0], cfg.Tokens, "/realms/development", nil, "test-kid", clock)
 }
 
 func BenchmarkAuthRequestByIDWithActiveState(b *testing.B) {
 	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
-	store := NewStore(testConfig(b), nil, "test-kid", clock)
+	cfg := testConfig(b)
+	store := NewStore(cfg.Realms[0], cfg.Tokens, "/realms/development", nil, "test-kid", clock)
 	const requestCount = 10_000
 	for i := range requestCount {
 		id := fmt.Sprintf("request-%d", i)
@@ -48,7 +50,8 @@ func BenchmarkAuthRequestByIDWithActiveState(b *testing.B) {
 }
 
 func BenchmarkRevokeFamilyWithManyFamilies(b *testing.B) {
-	store := NewStore(testConfig(b), nil, "test-kid", nil)
+	cfg := testConfig(b)
+	store := NewStore(cfg.Realms[0], cfg.Tokens, "/realms/development", nil, "test-kid", nil)
 	const familyCount = 10_000
 	for i := range familyCount {
 		familyID := fmt.Sprintf("family-%d", i)

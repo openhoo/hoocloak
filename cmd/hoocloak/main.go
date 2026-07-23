@@ -105,16 +105,22 @@ func serve(path string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return fmt.Errorf("generate signing key: %w", err)
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate effective config: %w", err)
 	}
-	thumbprint, err := (&jose.JSONWebKey{Key: &key.PublicKey}).Thumbprint(crypto.SHA256)
-	if err != nil {
-		return fmt.Errorf("derive signing key id: %w", err)
+	keys := make(map[string]idp.SigningKey, len(cfg.Realms))
+	for _, realm := range cfg.Realms {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return fmt.Errorf("generate signing key for realm %q: %w", realm.Name, err)
+		}
+		thumbprint, err := (&jose.JSONWebKey{Key: &key.PublicKey}).Thumbprint(crypto.SHA256)
+		if err != nil {
+			return fmt.Errorf("derive signing key ID for realm %q: %w", realm.Name, err)
+		}
+		keys[realm.Name] = idp.SigningKey{Key: key, KID: base64.RawURLEncoding.EncodeToString(thumbprint)}
 	}
-	kid := base64.RawURLEncoding.EncodeToString(thumbprint)
-	provider, err := idp.NewServer(cfg, key, kid, logger, nil)
+	provider, err := idp.NewServer(cfg, keys, logger, nil)
 	if err != nil {
 		return err
 	}
@@ -124,11 +130,14 @@ func serve(path string, logger *slog.Logger) error {
 		ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second,
 		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20,
 	}
+	for _, realm := range cfg.Realms {
+		logger.Info("hoocloak realm configured", "realm", realm.Name, "issuer", cfg.RealmIssuer(realm.Name), "kid", keys[realm.Name].KID)
+	}
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	serverError := make(chan error, 1)
 	go func() {
-		logger.Info("hoocloak listening", "address", cfg.Listen, "issuer", cfg.Issuer, "kid", kid)
+		logger.Info("hoocloak listening", "address", cfg.Listen, "realms", len(cfg.Realms))
 		serverError <- httpServer.ListenAndServe()
 	}()
 	select {

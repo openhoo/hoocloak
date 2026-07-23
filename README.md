@@ -2,7 +2,7 @@
 
 Hoocloak is a deliberately small OpenID Connect provider for local development. It gives browser SPAs an Authorization Code + PKCE login and gives service accounts an OAuth 2.0 client-credentials flow. APIs validate short-lived RS256 JWTs through standard discovery and JWKS.
 
-> **Development only.** Hoocloak keeps signing keys, authorization state, refresh-token families, and revocations in memory and rotates the signing key on every restart. It has no durable sessions, administration UI/API, federation, MFA, registration, recovery, or production availability guarantees.
+> **Development only.** Hoocloak keeps each realm's signing key, authorization state, refresh-token families, and revocations in memory and rotates every realm signing key on restart. It has no durable sessions, administration UI/API, federation, MFA, registration, recovery, or production availability guarantees.
 
 ```mermaid
 flowchart LR
@@ -31,11 +31,11 @@ Open <http://localhost:3000/>. The examples use:
 | `bob` | `bob-password` | role `reader`, permission `api.read` |
 | `example-worker` | `dev-secret` | role `worker`, permission `api.read` |
 
-Endpoints:
+Endpoints for the `development` realm:
 
-- Issuer: `http://hoocloak.localhost:8080/`
-- Discovery: <http://hoocloak.localhost:8080/.well-known/openid-configuration>
-- JWKS: <http://hoocloak.localhost:8080/keys>
+- Issuer: `http://hoocloak.localhost:8080/realms/development`
+- Discovery: <http://hoocloak.localhost:8080/realms/development/.well-known/openid-configuration>
+- JWKS: <http://hoocloak.localhost:8080/realms/development/keys>
 - Example API: <http://api.localhost:5099/api/public>
 
 Compose publishes all example ports on `127.0.0.1` only, waits for service health, and runs every container with a read-only root filesystem, no Linux capabilities, and `no-new-privileges` (using memory-backed `/tmp` only where required). Check a standalone provider with:
@@ -55,13 +55,13 @@ in [`internal/version/version`](internal/version/version); release images stamp
 the same released version into the binary. Published images support
 `linux/amd64` and `linux/arm64`; their OCI layers use Zstandard compression.
 
-If your host does not resolve `api.localhost` and `hoocloak.localhost` to loopback, map both names to `127.0.0.1`. Keep the issuer byte-for-byte identical in the browser, API, and provider.
+If your host does not resolve `api.localhost` and `hoocloak.localhost` to loopback, map both names to `127.0.0.1`. Keep the complete realm issuer byte-for-byte identical in the browser, API, and provider; for the runnable examples that is `http://hoocloak.localhost:8080/realms/development`.
 
 ## Helm
 
 The chart in [`charts/hoocloak`](charts/hoocloak) deploys the provider as a
 single hardened pod. Hoocloak deliberately supports exactly one replica because
-signing keys, authorization state, refresh-token families, and revocations are
+each realm's signing key, authorization state, refresh-token families, and revocations are
 kept in memory.
 
 Create a Secret containing a complete Hoocloak configuration, then install the
@@ -85,38 +85,45 @@ Secret to restart the pod and reload its immutable subPath mount. Optional
 Ingress, service-account, image digest, scheduling, resource, probe, and
 security-context settings are available in
 [`values.yaml`](charts/hoocloak/values.yaml). When enabling Ingress, terminate
-TLS there and set `hoocloakConfig.issuer` to the exact external HTTPS root URL,
-including its trailing slash.
+TLS there and set `hoocloakConfig.base_url` to the exact external HTTPS root URL,
+including its trailing slash. Realm issuers are derived beneath it as
+`{base_url}realms/{realm-name}`.
 
 ## Configuration
 
 `hoocloak serve --config ./hoocloak.yaml` loads immutable YAML before opening a socket. Unknown fields and unsafe client settings are rejected. See [`examples/hoocloak.yaml`](examples/hoocloak.yaml) for the complete runnable configuration.
 
 ```yaml
-issuer: http://hoocloak.localhost:8080/
+base_url: http://hoocloak.localhost:8080/
 listen: 0.0.0.0:8080
 tokens:
   access_ttl: 5m
   id_ttl: 5m
   refresh_ttl: 8h
-users:
-  - id: alice
-    username: alice
-    password_hash: "$2a$..."
-    name: Alice Admin
-    email: alice@example.test
-    email_verified: true
-    roles: [admin]
-    permissions: [api.read]
-clients:
-  - id: react-spa
-    type: spa
-    redirect_uris: [http://localhost:3000/auth/callback]
-    post_logout_redirect_uris: [http://localhost:3000/auth/logout/callback]
-    origins: [http://localhost:3000]
-    audiences: [hoocloak-api]
-    allowed_scopes: [openid, profile, email, offline_access, api.read]
+realms:
+  - name: development
+    users:
+      - id: alice
+        username: alice
+        password_hash: "$2a$..."
+        name: Alice Admin
+        email: alice@example.test
+        email_verified: true
+        roles: [admin]
+        permissions: [api.read]
+    clients:
+      - id: react-spa
+        type: spa
+        redirect_uris: [http://localhost:3000/auth/callback]
+        post_logout_redirect_uris: [http://localhost:3000/auth/logout/callback]
+        origins: [http://localhost:3000]
+        audiences: [hoocloak-api]
+        allowed_scopes: [openid, profile, email, offline_access, api.read]
 ```
+
+This is a breaking configuration cutover: the former top-level `issuer`, `users`, and `clients` fields are not accepted. `base_url` is the process root and must end in `/`; each issuer is derived as `{base_url}realms/{name}`. Realm names must match `^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`.
+
+Users, clients, protocol state, signing keys, KIDs, JWKS, and CORS/CSP policy are isolated per realm. IDs and usernames may therefore repeat in different realms without sharing credentials or state. The listener, token TTLs, UI theme, and `HOOCLOAK_LOGIN_MODE` are process-wide. Operational probes remain global at root `/ready` and `/healthz`; they are not realm endpoints.
 
 Generate password and client-secret hashes without putting plaintext in YAML:
 
@@ -135,7 +142,7 @@ services:
 
 The selection mode exposes every configured user on the login page and is intended only for trusted development environments.
 
-Cleartext HTTP is accepted only for loopback, `localhost`, and `.localhost` hosts. Non-local deployments must use HTTPS and preserve exact issuer, redirect URI, post-logout URI, and CORS-origin equality.
+Cleartext HTTP is accepted only for loopback, `localhost`, and `.localhost` hosts. Non-local deployments must use HTTPS and preserve exact realm-issuer, redirect URI, post-logout URI, and CORS-origin equality.
 
 ## Provider login UI
 
@@ -160,7 +167,7 @@ themes/aurora/
     └── logo.svg
 ```
 
-`login.html` and `logged-out.html` are Go `html/template` files. Login templates receive `.RequestID`, `.Client`, `.CSRF`, `.Mode`, `.Username`, `.SelectedID`, `.Identities`, and `.Error`. They must preserve a native `POST /login` form with `authRequestID` and `csrf`; password mode submits `username` and `password`, while selection mode submits `identity`. Files below `assets/` are served at `/assets/`; external URLs and inline scripts/styles remain blocked by the provider CSP. Invalid, incomplete, or non-executable theme packages fail startup before the listener opens. Hoocloak still owns request lookup, bounded form parsing, CSRF validation, authentication, redirects, and error handling.
+`login.html` and `logged-out.html` are Go `html/template` files. Both receive `.BasePath`, such as `/realms/development`, and every form and asset URL must remain under that path. Login templates also receive `.RequestID`, `.Client`, `.CSRF`, `.Mode`, `.Username`, `.SelectedID`, `.Identities`, and `.Error`. They must preserve a native `POST {{.BasePath}}/login` form with `authRequestID` and `csrf`; password mode submits `username` and `password`, while selection mode submits `identity`. Files below `assets/` are served at `{{.BasePath}}/assets/`; root-relative `/login` and `/assets/` URLs are not supported. External URLs and inline scripts/styles remain blocked by the realm's CSP. Invalid, incomplete, or non-executable theme packages fail startup before the listener opens. Hoocloak still owns request lookup, bounded form parsing, CSRF validation, authentication, redirects, and error handling.
 
 For Docker Compose, keep the normal stack untouched and layer the supplied override file over it. The theme is mounted read-only and selected through an absolute container path, so changing themes does not require rebuilding the image:
 
@@ -206,7 +213,7 @@ The runnable integration is [`examples/react-spa`](examples/react-spa). Its esse
 
 ```ts
 {
-  authority: "http://hoocloak.localhost:8080/",
+  authority: "http://hoocloak.localhost:8080/realms/development",
   client_id: "react-spa",
   redirect_uri: `${window.location.origin}/auth/callback`,
   post_logout_redirect_uri: `${window.location.origin}/auth/logout/callback`,
@@ -226,7 +233,7 @@ The runnable .NET 10 API is [`examples/aspnet-api`](examples/aspnet-api). It use
 ```json
 {
   "Oidc": {
-    "Authority": "http://hoocloak.localhost:8080/",
+    "Authority": "http://hoocloak.localhost:8080/realms/development",
     "Audience": "hoocloak-api"
   },
   "Cors": {
@@ -244,7 +251,7 @@ Hoocloak accepts service credentials only through HTTP Basic authentication. The
 ```bash
 TOKEN="$({ curl -fsS -u example-worker:dev-secret \
   -d 'grant_type=client_credentials&scope=api.read' \
-  http://hoocloak.localhost:8080/oauth/token; } | jq -er .access_token)"
+  http://hoocloak.localhost:8080/realms/development/oauth/token; } | jq -er .access_token)"
 
 curl -i -H "Authorization: Bearer $TOKEN" \
   http://api.localhost:5099/api/profile
@@ -255,6 +262,6 @@ curl -i -H "Authorization: Bearer $TOKEN" \
 - Access and ID tokens live for five minutes in the example; refresh families live for eight hours.
 - Refresh tokens rotate once. Reusing an ancestor revokes the active family.
 - Logout and revocation block refresh immediately, but cannot retract an already-issued self-contained JWT from an API validating locally. The example API adds 30 seconds of clock skew.
-- Every provider restart creates a new RSA key and loses all in-memory state. The Development API refreshes metadata on an unknown `kid`; it may continue accepting a pre-restart JWT from its last-known-good key cache until that token expires plus skew.
+- Every provider restart creates a distinct new RSA key for each realm and loses all in-memory realm state. The Development API refreshes metadata on an unknown `kid`; it may continue accepting a pre-restart JWT from its last-known-good key cache until that token expires plus skew.
 - There is no provider SSO cookie. A new top-level authorization request asks for credentials; same-tab continuity comes from the SPA refresh token in `sessionStorage`.
 - Supported flows are Authorization Code with mandatory S256 PKCE, rotating SPA refresh tokens, RP-initiated logout/revocation with a validated ID-token hint, and Basic-authenticated `client_credentials`.

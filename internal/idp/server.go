@@ -59,18 +59,31 @@ var supportedClaims = []string{
 
 const maxFormBodyBytes = 64 << 10
 
+type SigningKey struct {
+	Key *rsa.PrivateKey
+	KID string
+}
+
 type Server struct {
+	Handler http.Handler
+	realms  map[string]*realmServer
+}
+
+type realmServer struct {
 	Handler       http.Handler
 	Provider      *op.Provider
 	Store         *Store
-	cfg           config.Config
+	realm         config.Realm
+	loginMode     string
+	issuer        string
+	basePath      string
 	secureCookies bool
 	uiTemplates   *template.Template
 	uiAssets      fs.FS
 	discoveryJSON []byte
 }
 
-func NewServer(cfg config.Config, key *rsa.PrivateKey, kid string, logger *slog.Logger, clock Clock) (*Server, error) {
+func NewServer(cfg config.Config, keys map[string]SigningKey, logger *slog.Logger, clock Clock) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -78,49 +91,85 @@ func NewServer(cfg config.Config, key *rsa.PrivateKey, kid string, logger *slog.
 	if err != nil {
 		return nil, fmtError("load login theme", err)
 	}
-	store := NewStore(cfg, key, kid, clock)
-	scopes := configuredScopes(cfg)
-	derivation := keyDerivation(key)
-	providerConfig := &op.Config{
-		CryptoKey: derivation, CryptoKeyId: kid, DefaultLogoutRedirectURI: "/logged-out",
-		CodeMethodS256: true, GrantTypeRefreshToken: true, AuthMethodPost: false,
-		AuthMethodPrivateKeyJWT: false, SupportedUILocales: []language.Tag{language.English},
-		SupportedClaims: slices.Clone(supportedClaims), SupportedScopes: scopes,
+	if len(keys) != len(cfg.Realms) {
+		return nil, fmt.Errorf("signing keys must contain exactly one entry per realm")
 	}
-	options := []op.Option{op.WithCORSOptions(nil), op.WithLogger(logger)}
-	if strings.HasPrefix(cfg.Issuer, "http://") {
-		options = append(options, op.WithAllowInsecure())
-	}
-	provider, err := op.NewProvider(providerConfig, store, op.StaticIssuer(cfg.Issuer), options...)
-	if err != nil {
-		return nil, fmtError("create OIDC provider", err)
-	}
-	discoveryJSON, err := json.Marshal(discoveryMetadata(cfg, scopes))
-	if err != nil {
-		return nil, fmtError("encode OIDC discovery document", err)
-	}
-	discoveryJSON = append(discoveryJSON, '\n')
 
-	s := &Server{
-		Provider: provider, Store: store, cfg: cfg,
-		secureCookies: strings.HasPrefix(cfg.Issuer, "https://"),
-		uiTemplates:   uiTemplates, uiAssets: uiAssets, discoveryJSON: discoveryJSON,
+	server := &Server{realms: make(map[string]*realmServer, len(cfg.Realms))}
+	root := http.NewServeMux()
+	probes := make([]op.ProbesFn, 0, len(cfg.Realms))
+	for _, realm := range cfg.Realms {
+		signing, exists := keys[realm.Name]
+		if !exists {
+			return nil, fmt.Errorf("signing key for realm %q is required", realm.Name)
+		}
+		if signing.Key == nil {
+			return nil, fmt.Errorf("signing key for realm %q must not be nil", realm.Name)
+		}
+		if signing.KID == "" {
+			return nil, fmt.Errorf("signing key ID for realm %q must not be empty", realm.Name)
+		}
+		issuer := cfg.RealmIssuer(realm.Name)
+		basePath := "/realms/" + realm.Name
+		store := NewStore(realm, cfg.Tokens, basePath, signing.Key, signing.KID, clock)
+		scopes := configuredScopes(realm)
+		providerConfig := &op.Config{
+			CryptoKey: keyDerivation(signing.Key), CryptoKeyId: signing.KID, DefaultLogoutRedirectURI: basePath + "/logged-out",
+			CodeMethodS256: true, GrantTypeRefreshToken: true, AuthMethodPost: false,
+			AuthMethodPrivateKeyJWT: false, SupportedUILocales: []language.Tag{language.English},
+			SupportedClaims: slices.Clone(supportedClaims), SupportedScopes: scopes,
+		}
+		options := []op.Option{op.WithCORSOptions(nil), op.WithLogger(logger)}
+		if strings.HasPrefix(cfg.BaseURL, "http://") {
+			options = append(options, op.WithAllowInsecure())
+		}
+		provider, err := op.NewProvider(providerConfig, store, op.StaticIssuer(issuer), options...)
+		if err != nil {
+			return nil, fmt.Errorf("create OIDC provider for realm %q: %w", realm.Name, err)
+		}
+		discoveryJSON, err := json.Marshal(discoveryMetadata(issuer, scopes))
+		if err != nil {
+			return nil, fmt.Errorf("encode OIDC discovery document for realm %q: %w", realm.Name, err)
+		}
+		discoveryJSON = append(discoveryJSON, '\n')
+		realmRuntime := &realmServer{
+			Provider: provider, Store: store, realm: realm, loginMode: cfg.LoginMode,
+			issuer: issuer, basePath: basePath, secureCookies: strings.HasPrefix(issuer, "https://"),
+			uiTemplates: uiTemplates, uiAssets: uiAssets, discoveryJSON: discoveryJSON,
+		}
+		realmMux := http.NewServeMux()
+		realmMux.HandleFunc("/.well-known/openid-configuration", realmRuntime.discovery)
+		realmMux.HandleFunc("/assets/", realmRuntime.asset)
+		realmMux.HandleFunc("/ready", http.NotFound)
+		realmMux.HandleFunc("/healthz", http.NotFound)
+		issuerInterceptor := op.NewIssuerInterceptor(provider.IssuerFromRequest)
+		realmMux.Handle("/login", issuerInterceptor.Handler(http.HandlerFunc(realmRuntime.login)))
+		realmMux.Handle("/logged-out", issuerInterceptor.Handler(http.HandlerFunc(realmRuntime.loggedOut)))
+		realmMux.Handle("/", realmRuntime.protocolGates(provider))
+		corsPolicy := cors.New(cors.Options{
+			AllowedOrigins: configuredOrigins(realm), AllowedMethods: []string{http.MethodGet, http.MethodHead, http.MethodPost},
+			AllowedHeaders: []string{"Accept", "Authorization", "Content-Type"}, AllowCredentials: false, MaxAge: 300,
+		})
+		realmRuntime.Handler = corsPolicy.Handler(realmMux)
+		server.realms[realm.Name] = realmRuntime
+		probes = append(probes, op.ReadyStorage(store))
+		root.Handle(basePath+"/", http.StripPrefix(basePath, realmRuntime.Handler))
+		root.HandleFunc(basePath, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, basePath+"/", http.StatusPermanentRedirect)
+		})
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/openid-configuration", s.discovery)
-	mux.HandleFunc("/assets/", s.asset)
-	issuer := op.NewIssuerInterceptor(provider.IssuerFromRequest)
-	mux.Handle("/login", issuer.Handler(http.HandlerFunc(s.login)))
-	mux.Handle("/logged-out", issuer.Handler(http.HandlerFunc(s.loggedOut)))
-	mux.Handle("/", s.protocolGates(provider))
-	origins := configuredOrigins(cfg)
-	corsPolicy := cors.New(cors.Options{
-		AllowedOrigins: origins, AllowedMethods: []string{http.MethodGet, http.MethodHead, http.MethodPost},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		AllowCredentials: false, MaxAge: 300,
+	for realmName := range keys {
+		if _, exists := server.realms[realmName]; !exists {
+			return nil, fmt.Errorf("signing key for unknown realm %q", realmName)
+		}
+	}
+	root.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{\"status\":\"ok\"}\n")
 	})
-	s.Handler = corsPolicy.Handler(mux)
-	return s, nil
+	root.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) { op.Readiness(w, r, probes...) })
+	server.Handler = root
+	return server, nil
 }
 
 func loadUI(themeDir string) (*template.Template, fs.FS, error) {
@@ -159,17 +208,28 @@ func loadUI(themeDir string) (*template.Template, fs.FS, error) {
 }
 
 func preflightUITemplates(templates *template.Template) error {
+	const basePath = "/realms/hoocloak-theme-preflight"
 	login := loginData{
-		RequestID: "request-id", Client: "Example client", CSRF: "csrf-token",
+		BasePath: basePath, RequestID: "request-id", Client: "Example client", CSRF: "csrf-token",
 		Mode: config.LoginModePassword, Username: "username", Error: "invalid credentials",
 		Identities: []loginIdentity{{ID: "user-id", Username: "username", Name: "Example User", Email: "user@example.test"}},
 	}
 	for _, check := range []struct {
 		name string
 		data any
-	}{{name: "login", data: login}, {name: "logged-out", data: nil}} {
-		if err := templates.ExecuteTemplate(io.Discard, check.name, check.data); err != nil {
+	}{{name: "login", data: login}, {name: "logged-out", data: loggedOutData{BasePath: basePath}}} {
+		var rendered bytes.Buffer
+		if err := templates.ExecuteTemplate(&rendered, check.name, check.data); err != nil {
 			return fmt.Errorf("execute %s.html: %w", check.name, err)
+		}
+		output := rendered.String()
+		if check.name == "login" && !strings.Contains(output, basePath+"/login") {
+			return errors.New("execute login.html: login form action must use .BasePath")
+		}
+		for _, rootRelative := range []string{`="/login`, `='/login`, `="/assets/`, `='/assets/`} {
+			if strings.Contains(output, rootRelative) {
+				return fmt.Errorf("execute %s.html: root-relative login and asset URLs are not allowed; use .BasePath", check.name)
+			}
 		}
 	}
 	return nil
@@ -179,9 +239,9 @@ func keyDerivation(key *rsa.PrivateKey) [32]byte {
 	return sha256.Sum256(x509.MarshalPKCS1PrivateKey(key))
 }
 
-func configuredScopes(cfg config.Config) []string {
+func configuredScopes(realm config.Realm) []string {
 	seen := make(map[string]struct{})
-	for _, client := range cfg.Clients {
+	for _, client := range realm.Clients {
 		for _, scope := range client.AllowedScopes {
 			seen[scope] = struct{}{}
 		}
@@ -193,9 +253,9 @@ func configuredScopes(cfg config.Config) []string {
 	sort.Strings(result)
 	return result
 }
-func configuredOrigins(cfg config.Config) []string {
+func configuredOrigins(realm config.Realm) []string {
 	seen := make(map[string]struct{})
-	for _, client := range cfg.Clients {
+	for _, client := range realm.Clients {
 		if client.Type == config.ClientTypeSPA {
 			for _, origin := range client.Origins {
 				seen[origin] = struct{}{}
@@ -210,7 +270,7 @@ func configuredOrigins(cfg config.Config) []string {
 	return result
 }
 
-func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
+func (s *realmServer) discovery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -224,10 +284,10 @@ func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.discoveryJSON)
 }
 
-func discoveryMetadata(cfg config.Config, scopes []string) map[string]any {
-	endpoint := func(path string) string { return cfg.Issuer + strings.TrimPrefix(path, "/") }
-	metadata := map[string]any{
-		"issuer": cfg.Issuer, "authorization_endpoint": endpoint("/authorize"), "token_endpoint": endpoint("/oauth/token"),
+func discoveryMetadata(issuer string, scopes []string) map[string]any {
+	endpoint := func(path string) string { return issuer + path }
+	return map[string]any{
+		"issuer": issuer, "authorization_endpoint": endpoint("/authorize"), "token_endpoint": endpoint("/oauth/token"),
 		"introspection_endpoint": endpoint("/oauth/introspect"), "userinfo_endpoint": endpoint("/userinfo"),
 		"revocation_endpoint": endpoint("/revoke"), "end_session_endpoint": endpoint("/end_session"), "jwks_uri": endpoint("/keys"),
 		"scopes_supported": slices.Clone(scopes), "response_types_supported": []string{"code"}, "response_modes_supported": []string{"query"},
@@ -236,10 +296,9 @@ func discoveryMetadata(cfg config.Config, scopes []string) map[string]any {
 		"revocation_endpoint_auth_methods_supported": []string{"none", "client_secret_basic"}, "introspection_endpoint_auth_methods_supported": []string{"client_secret_basic"},
 		"code_challenge_methods_supported": []string{"S256"}, "claims_supported": slices.Clone(supportedClaims),
 	}
-	return metadata
 }
 
-func (s *Server) protocolGates(next http.Handler) http.Handler {
+func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			switch r.URL.Path {
@@ -274,7 +333,7 @@ func (s *Server) protocolGates(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) authorizeGate(w http.ResponseWriter, r *http.Request) bool {
+func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool {
 	query := r.URL.Query()
 	client := s.Store.clients[query.Get("client_id")]
 	if client == nil || client.config.Type != config.ClientTypeSPA {
@@ -305,7 +364,7 @@ func (s *Server) authorizeGate(w http.ResponseWriter, r *http.Request) bool {
 	}
 	return true
 }
-func (s *Server) tokenGate(w http.ResponseWriter, r *http.Request) bool {
+func (s *realmServer) tokenGate(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return true
 	}
@@ -339,7 +398,7 @@ func oauthError(w http.ResponseWriter, status int, code, description string, bas
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code, "error_description": description})
 }
 
-func (s *Server) userinfoResponse(next http.Handler, w http.ResponseWriter, r *http.Request) {
+func (s *realmServer) userinfoResponse(next http.Handler, w http.ResponseWriter, r *http.Request) {
 	capture := &responseCapture{header: make(http.Header)}
 	next.ServeHTTP(capture, r)
 	if capture.status == http.StatusUnauthorized || capture.status == http.StatusForbidden {
@@ -379,18 +438,18 @@ func (w *responseCapture) Write(data []byte) (int, error) {
 	return w.body.Write(data)
 }
 
-func (s *Server) securityHeaders(w http.ResponseWriter) {
+func (s *realmServer) securityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Frame-Options", "DENY")
-	formActions := append([]string{"'self'"}, configuredRedirectOrigins(s.cfg)...)
+	formActions := append([]string{"'self'"}, configuredRedirectOrigins(s.realm)...)
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; form-action "+strings.Join(formActions, " ")+"; base-uri 'none'; frame-ancestors 'none'")
 }
 
-func configuredRedirectOrigins(cfg config.Config) []string {
+func configuredRedirectOrigins(realm config.Realm) []string {
 	seen := make(map[string]struct{})
-	for _, client := range cfg.Clients {
+	for _, client := range realm.Clients {
 		if client.Type != config.ClientTypeSPA {
 			continue
 		}
@@ -408,7 +467,7 @@ func configuredRedirectOrigins(cfg config.Config) []string {
 	sort.Strings(origins)
 	return origins
 }
-func (s *Server) asset(w http.ResponseWriter, r *http.Request) {
+func (s *realmServer) asset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -444,7 +503,7 @@ func (s *Server) asset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, name, info.ModTime(), content)
 }
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+func (s *realmServer) login(w http.ResponseWriter, r *http.Request) {
 	s.securityHeaders(w)
 	switch r.Method {
 	case http.MethodGet:
@@ -460,26 +519,29 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 type loginIdentity struct{ ID, Username, Name, Email string }
 
 type loginData struct {
+	BasePath                                                   string
 	RequestID, Client, CSRF, Mode, Username, SelectedID, Error string
 	Identities                                                 []loginIdentity
 }
 
-func (s *Server) loginPageData(requestID, client, csrf string) loginData {
-	mode := s.cfg.LoginMode
+type loggedOutData struct{ BasePath string }
+
+func (s *realmServer) loginPageData(requestID, client, csrf string) loginData {
+	mode := s.loginMode
 	if mode == "" {
 		mode = config.LoginModePassword
 	}
-	data := loginData{RequestID: requestID, Client: client, CSRF: csrf, Mode: mode}
+	data := loginData{BasePath: s.basePath, RequestID: requestID, Client: client, CSRF: csrf, Mode: mode}
 	if mode == config.LoginModeSelect {
-		data.Identities = make([]loginIdentity, 0, len(s.cfg.Users))
-		for _, user := range s.cfg.Users {
+		data.Identities = make([]loginIdentity, 0, len(s.realm.Users))
+		for _, user := range s.realm.Users {
 			data.Identities = append(data.Identities, loginIdentity{ID: user.ID, Username: user.Username, Name: user.Name, Email: user.Email})
 		}
 	}
 	return data
 }
 
-func (s *Server) loginGET(w http.ResponseWriter, r *http.Request) {
+func (s *realmServer) loginGET(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("authRequestID")
 	client, err := s.Store.LoginInfo(id)
 	if err != nil {
@@ -492,10 +554,10 @@ func (s *Server) loginGET(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// #nosec G124 -- Secure is intentionally false only for validated local HTTP issuers.
-	http.SetCookie(w, &http.Cookie{Name: csrfCookieName(id), Value: csrf, Path: "/login", MaxAge: 600, Expires: time.Now().Add(10 * time.Minute), HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: csrfCookieName(id), Value: csrf, Path: s.basePath + "/login", MaxAge: 600, Expires: time.Now().Add(10 * time.Minute), HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
 	s.renderLogin(w, http.StatusOK, s.loginPageData(id, client, csrf))
 }
-func (s *Server) loginPOST(w http.ResponseWriter, r *http.Request) {
+func (s *realmServer) loginPOST(w http.ResponseWriter, r *http.Request) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/x-www-form-urlencoded" {
 		http.Error(w, "login requires application/x-www-form-urlencoded", http.StatusUnsupportedMediaType)
@@ -538,10 +600,10 @@ func (s *Server) loginPOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// #nosec G124 -- Secure is intentionally false only for validated local HTTP issuers.
-	http.SetCookie(w, &http.Cookie{Name: csrfCookieName(id), Value: "", Path: "/login", MaxAge: -1, HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: csrfCookieName(id), Value: "", Path: s.basePath + "/login", MaxAge: -1, HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, op.AuthCallbackURL(s.Provider)(r.Context(), id), http.StatusSeeOther)
 }
-func (s *Server) renderLogin(w http.ResponseWriter, status int, data loginData) {
+func (s *realmServer) renderLogin(w http.ResponseWriter, status int, data loginData) {
 	var body bytes.Buffer
 	if err := s.uiTemplates.ExecuteTemplate(&body, "login", data); err != nil {
 		http.Error(w, "unable to render login", http.StatusInternalServerError)
@@ -551,7 +613,7 @@ func (s *Server) renderLogin(w http.ResponseWriter, status int, data loginData) 
 	w.WriteHeader(status)
 	_, _ = body.WriteTo(w)
 }
-func (s *Server) loggedOut(w http.ResponseWriter, r *http.Request) {
+func (s *realmServer) loggedOut(w http.ResponseWriter, r *http.Request) {
 	s.securityHeaders(w)
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -560,7 +622,7 @@ func (s *Server) loggedOut(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		var body bytes.Buffer
-		if err := s.uiTemplates.ExecuteTemplate(&body, "logged-out", nil); err != nil {
+		if err := s.uiTemplates.ExecuteTemplate(&body, "logged-out", loggedOutData{BasePath: s.basePath}); err != nil {
 			http.Error(w, "unable to render logged-out page", http.StatusInternalServerError)
 			return
 		}

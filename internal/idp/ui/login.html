@@ -4,11 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Sign in · Hoocloak</title>
-  <link rel="stylesheet" href="/assets/login.css">
+  <link rel="stylesheet" href="{{.BasePath}}/assets/login.css">
 </head>
 <body>
   <div
     id="login-root"
+    data-base-path="{{.BasePath}}"
     data-request-id="{{.RequestID}}"
     data-client="{{.Client}}"
     data-csrf="{{.CSRF}}"
@@ -18,6 +19,6 @@
     data-identities='{{.Identities | json}}'
     data-error="{{.Error}}"
   ></div>
-  <script type="module" src="/assets/login.js"></script>
+  <script type="module" src="{{.BasePath}}/assets/login.js"></script>
 </body>
 </html>{{end}}

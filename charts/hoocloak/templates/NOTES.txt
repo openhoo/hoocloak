@@ -11,5 +11,6 @@ For local access:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hoocloak.fullname" . }} 8080:{{ .Values.service.port }}
 {{- end }}
 
-The configured issuer must exactly match the URL used by clients and must end in /.
+The configured base_url must be the exact external root URL and must end in /.
+Each realm issuer is base_url followed by realms/<realm-name>.
 Hoocloak is development-only and deliberately restricted to one replica because signing keys and sessions are in memory.

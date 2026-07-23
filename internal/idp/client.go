@@ -12,12 +12,13 @@ import (
 )
 
 type Client struct {
-	config config.Client
-	idTTL  time.Duration
-	dev    bool
+	config   config.Client
+	idTTL    time.Duration
+	basePath string
+	dev      bool
 }
 
-func newClient(c config.Client, idTTL time.Duration) *Client {
+func newClient(c config.Client, idTTL time.Duration, basePath string) *Client {
 	dev := false
 	if c.Type == config.ClientTypeSPA {
 		for _, raw := range c.RedirectURIs {
@@ -27,7 +28,7 @@ func newClient(c config.Client, idTTL time.Duration) *Client {
 			}
 		}
 	}
-	return &Client{config: c, idTTL: idTTL, dev: dev}
+	return &Client{config: c, idTTL: idTTL, basePath: basePath, dev: dev}
 }
 
 func (c *Client) GetID() string          { return c.config.ID }
@@ -60,7 +61,7 @@ func (c *Client) GrantTypes() []oidc.GrantType {
 	return []oidc.GrantType{oidc.GrantTypeClientCredentials}
 }
 func (c *Client) LoginURL(requestID string) string {
-	return "/login?authRequestID=" + url.QueryEscape(requestID)
+	return c.basePath + "/login?authRequestID=" + url.QueryEscape(requestID)
 }
 func (c *Client) AccessTokenType() op.AccessTokenType { return op.AccessTokenTypeJWT }
 func (c *Client) IDTokenLifetime() time.Duration      { return c.idTTL }

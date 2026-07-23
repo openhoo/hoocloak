@@ -94,10 +94,18 @@
     "existingConfigSecretVersion": { "type": "string" },
     "hoocloakConfig": {
       "type": "object",
-      "required": ["issuer", "listen", "tokens", "users", "clients"],
+      "additionalProperties": false,
+      "required": ["base_url", "listen", "tokens", "realms"],
       "properties": {
-        "issuer": { "type": "string", "pattern": "^https?://.+/$" },
+        "base_url": { "type": "string", "pattern": "^https?://[^/?#]+/$" },
         "listen": { "type": "string", "const": "0.0.0.0:8080" },
+        "ui": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "theme_dir": { "type": "string", "minLength": 1 }
+          }
+        },
         "tokens": {
           "type": "object",
           "additionalProperties": false,
@@ -108,8 +116,20 @@
             "refresh_ttl": { "type": "string", "minLength": 1 }
           }
         },
-        "users": { "type": "array" },
-        "clients": { "type": "array" }
+        "realms": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "users", "clients"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$" },
+              "users": { "type": "array" },
+              "clients": { "type": "array" }
+            }
+          }
+        }
       }
     }
   },

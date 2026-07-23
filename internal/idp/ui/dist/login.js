@@ -517,17 +517,20 @@ function Q(e, t, n, r) {
 }
 //#endregion
 //#region src/main.tsx
-var oe = /*#__PURE__*/ G("<div class=alert id=sign-in-error role=alert aria-live=assertive>"), se = /*#__PURE__*/ G("<fieldset class=identity-list><legend>Select the user you want to act as"), ce = /*#__PURE__*/ G("<main class=login-shell><section class=card aria-labelledby=login-title><header class=card-header><div class=identity aria-label=Hoocloak><span class=identity-mark aria-hidden=true>H</span><span class=brand>Hoocloak</span></div><p class=eyebrow>Development identity</p><h1 id=login-title></h1><p class=client>Continue to <strong></strong></p></header><form method=post action=/login><input type=hidden name=authRequestID><input type=hidden name=csrf><button type=submit></button></form><p class=notice><span aria-hidden=true>Dev</span>For local development only."), le = /*#__PURE__*/ G("<div class=field><label for=username>Username</label><input id=username name=username autocomplete=username autofocus required>"), ue = /*#__PURE__*/ G("<div class=field><label for=password>Password</label><input id=password name=password type=password autocomplete=current-password required>"), de = /*#__PURE__*/ G("<label class=identity-option><input type=radio name=identity><span><strong></strong><small>@");
+var oe = /*#__PURE__*/ G("<div class=alert id=sign-in-error role=alert aria-live=assertive>"), se = /*#__PURE__*/ G("<fieldset class=identity-list><legend>Select the user you want to act as"), ce = /*#__PURE__*/ G("<main class=login-shell><section class=card aria-labelledby=login-title><header class=card-header><div class=identity aria-label=Hoocloak><span class=identity-mark aria-hidden=true>H</span><span class=brand>Hoocloak</span></div><p class=eyebrow>Development identity</p><h1 id=login-title></h1><p class=client>Continue to <strong></strong></p></header><form method=post><input type=hidden name=authRequestID><input type=hidden name=csrf><button type=submit></button></form><p class=notice><span aria-hidden=true>Dev</span>For local development only."), le = /*#__PURE__*/ G("<div class=field><label for=username>Username</label><input id=username name=username autocomplete=username autofocus required>"), ue = /*#__PURE__*/ G("<div class=field><label for=password>Password</label><input id=password name=password type=password autocomplete=current-password required>"), de = /*#__PURE__*/ G("<label class=identity-option><input type=radio name=identity><span><strong></strong><small>@");
 function fe(e) {
-	let t = JSON.parse(e.dataset.identities ?? "[]");
+	let t = e.dataset.basePath ?? "";
+	if (!/^\/realms\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(t)) throw Error("Invalid realm base path");
+	let n = JSON.parse(e.dataset.identities ?? "[]");
 	return {
+		basePath: t,
 		requestId: e.dataset.requestId ?? "",
 		client: e.dataset.client ?? "",
 		csrf: e.dataset.csrf ?? "",
 		mode: e.dataset.mode === "select" ? "select" : "password",
 		username: e.dataset.username ?? "",
 		selectedId: e.dataset.selectedId ?? "",
-		identities: t,
+		identities: n,
 		error: e.dataset.error ?? ""
 	};
 }
@@ -578,7 +581,7 @@ function pe(e) {
 					})(), null), v(() => i.value = t.ID), v(() => i.checked = t.ID === e.selectedId), r;
 				})()), null), v(() => K(n, "aria-describedby", t() ? "sign-in-error" : void 0)), n;
 			}
-		}), u), q(u, () => e.mode === "select" ? "Continue as selected user" : "Sign in"), v(() => c.value = e.requestId), v(() => l.value = e.csrf), n;
+		}), u), q(u, () => e.mode === "select" ? "Continue as selected user" : "Sign in"), v(() => K(s, "action", `${e.basePath}/login`)), v(() => c.value = e.requestId), v(() => l.value = e.csrf), n;
 	})();
 }
 var $ = document.getElementById("login-root");

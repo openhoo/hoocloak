@@ -5,6 +5,37 @@ import {
   type User,
 } from "oidc-client-ts";
 
+const realmPathPattern = /^\/realms\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function readAuthority(name: string, value: string | undefined): URL {
+  if (!value) {
+    throw new Error(`${name} must be configured.`);
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an absolute URL.`);
+  }
+
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    !realmPathPattern.test(url.pathname) ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error(`${name} must be an absolute HTTP(S) realm URL without credentials, query, or fragment.`);
+  }
+  if (url.protocol === "http:" && !isLocalHost(url.hostname)) {
+    throw new Error(`${name} must use HTTPS unless it targets loopback, localhost, or a .localhost host.`);
+  }
+
+  return url;
+}
+
 function readOrigin(name: string, value: string | undefined): URL {
   if (!value) {
     throw new Error(`${name} must be configured.`);
@@ -41,7 +72,7 @@ function isLocalHost(hostname: string): boolean {
   return octets.length === 4 && octets[0] === "127" && octets.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
 }
 
-const authority = readOrigin("VITE_OIDC_AUTHORITY", import.meta.env.VITE_OIDC_AUTHORITY);
+const authority = readAuthority("VITE_OIDC_AUTHORITY", import.meta.env.VITE_OIDC_AUTHORITY);
 export const apiBase = readOrigin("VITE_API_BASE_URL", import.meta.env.VITE_API_BASE_URL);
 
 export function safeReturnTo(value: unknown): string {
