@@ -57,7 +57,7 @@ func BenchmarkRevokeFamilyWithManyFamilies(b *testing.B) {
 		familyID := fmt.Sprintf("family-%d", i)
 		hash := sha256.Sum256([]byte(familyID))
 		store.families[familyID] = &refreshFamily{id: familyID, tokens: [][32]byte{hash}}
-		store.refresh[hash] = &refreshRecord{hash: hash, familyID: familyID}
+		store.refresh[hash] = &refreshRecord{familyID: familyID}
 	}
 
 	b.ReportAllocs()

@@ -19,6 +19,7 @@ export default defineConfig({
       output: {
         entryFileNames: "login.js",
         assetFileNames: "login.css",
+        minify: true,
       },
     },
   },

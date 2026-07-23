@@ -73,7 +73,6 @@ type accessRecord struct {
 	familyID                    string
 }
 type refreshRecord struct {
-	hash                  [32]byte
 	familyID              string
 	clientID, subject     string
 	audience, scopes, amr []string
@@ -445,11 +444,10 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 		if family == nil || family.revoked || !now.Before(family.expires) || old.clientID != clientID {
 			return "", "", time.Time{}, oidc.ErrInvalidGrant()
 		}
-		old.consumed = true
-		delete(s.access, old.accessID)
+		delete(s.access, consumeRefreshRecord(old))
 	}
 	audience := slices.Clone(s.clients[clientID].config.Audiences)
-	record := &refreshRecord{hash: newHash, familyID: family.id, clientID: clientID, subject: request.GetSubject(), audience: audience, scopes: slices.Clone(request.GetScopes()), amr: slices.Clone(amr), authTime: authTime, accessID: accessID}
+	record := &refreshRecord{familyID: family.id, clientID: clientID, subject: request.GetSubject(), audience: audience, scopes: slices.Clone(request.GetScopes()), amr: slices.Clone(amr), authTime: authTime, accessID: accessID}
 	family.tokens = append(family.tokens, newHash)
 	s.refresh[newHash] = record
 	s.access[accessID] = accessRecord{id: accessID, clientID: clientID, subject: request.GetSubject(), audience: slices.Clone(audience), scopes: slices.Clone(request.GetScopes()), expires: expires, issuedAt: now, authTime: authTime, amr: slices.Clone(amr), familyID: family.id}
@@ -478,6 +476,14 @@ func (s *Store) TokenRequestByRefreshToken(_ context.Context, token string) (op.
 	return &RefreshRequest{clientID: record.clientID, subject: record.subject, audience: slices.Clone(record.audience), scopes: slices.Clone(record.scopes), amr: slices.Clone(record.amr), authTime: record.authTime, familyID: record.familyID}, nil
 }
 
+func consumeRefreshRecord(record *refreshRecord) string {
+	accessID := record.accessID
+	familyID := record.familyID
+	clientID := record.clientID
+	*record = refreshRecord{familyID: familyID, clientID: clientID, consumed: true}
+	return accessID
+}
+
 func (s *Store) revokeFamilyLocked(id string) {
 	family := s.families[id]
 	if family == nil {
@@ -489,8 +495,7 @@ func (s *Store) revokeFamilyLocked(id string) {
 		if record == nil {
 			continue
 		}
-		record.consumed = true
-		delete(s.access, record.accessID)
+		delete(s.access, consumeRefreshRecord(record))
 	}
 }
 

@@ -3,6 +3,7 @@
 .hooversion
 .dockerignore
 .gitignore
+assets
 **/node_modules
 **/dist
 **/bin

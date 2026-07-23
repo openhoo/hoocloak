@@ -73,7 +73,6 @@ type realmServer struct {
 	Handler       http.Handler
 	Provider      *op.Provider
 	Store         *Store
-	realm         config.Realm
 	loginMode     string
 	issuer        string
 	basePath      string
@@ -81,6 +80,8 @@ type realmServer struct {
 	uiTemplates   *template.Template
 	uiAssets      fs.FS
 	discoveryJSON []byte
+	csp           string
+	identities    []loginIdentity
 }
 
 func NewServer(cfg config.Config, keys map[string]SigningKey, logger *slog.Logger, clock Clock) (*Server, error) {
@@ -132,10 +133,17 @@ func NewServer(cfg config.Config, keys map[string]SigningKey, logger *slog.Logge
 			return nil, fmt.Errorf("encode OIDC discovery document for realm %q: %w", realm.Name, err)
 		}
 		discoveryJSON = append(discoveryJSON, '\n')
+		identities := make([]loginIdentity, 0, len(realm.Users))
+		for _, user := range realm.Users {
+			identities = append(identities, loginIdentity{ID: user.ID, Username: user.Username, Name: user.Name, Email: user.Email})
+		}
+		formActions := append([]string{"'self'"}, configuredRedirectOrigins(realm)...)
 		realmRuntime := &realmServer{
-			Provider: provider, Store: store, realm: realm, loginMode: cfg.LoginMode,
+			Provider: provider, Store: store, loginMode: cfg.LoginMode,
 			issuer: issuer, basePath: basePath, secureCookies: strings.HasPrefix(issuer, "https://"),
 			uiTemplates: uiTemplates, uiAssets: uiAssets, discoveryJSON: discoveryJSON,
+			csp:        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; form-action " + strings.Join(formActions, " ") + "; base-uri 'none'; frame-ancestors 'none'",
+			identities: identities,
 		}
 		realmMux := http.NewServeMux()
 		realmMux.HandleFunc("/.well-known/openid-configuration", realmRuntime.discovery)
@@ -443,8 +451,7 @@ func (s *realmServer) securityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Frame-Options", "DENY")
-	formActions := append([]string{"'self'"}, configuredRedirectOrigins(s.realm)...)
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; form-action "+strings.Join(formActions, " ")+"; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", s.csp)
 }
 
 func configuredRedirectOrigins(realm config.Realm) []string {
@@ -533,10 +540,7 @@ func (s *realmServer) loginPageData(requestID, client, csrf string) loginData {
 	}
 	data := loginData{BasePath: s.basePath, RequestID: requestID, Client: client, CSRF: csrf, Mode: mode}
 	if mode == config.LoginModeSelect {
-		data.Identities = make([]loginIdentity, 0, len(s.realm.Users))
-		for _, user := range s.realm.Users {
-			data.Identities = append(data.Identities, loginIdentity{ID: user.ID, Username: user.Username, Name: user.Name, Email: user.Email})
-		}
+		data.Identities = s.identities
 	}
 	return data
 }

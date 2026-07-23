@@ -120,7 +120,7 @@ jobs:
           helm package charts/hoocloak --destination "$RUNNER_TEMP"
 
   docker:
-    name: Docker Compose build
+    name: Container images
     needs:
       - commitlint
       - test
@@ -128,9 +128,13 @@ jobs:
     timeout-minutes: 30
     env:
       COMPOSE_PROJECT_NAME: hoocloak-ci-${{ github.run_id }}
+      MAX_COMPRESSED_SIZE: "5242880"
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Validate Compose
         run: |
@@ -138,8 +142,41 @@ jobs:
           HOOCLOAK_THEME_DIR="$RUNNER_TEMP/hoocloak-theme" \
             docker compose -f compose.yaml -f compose.theme.yaml config --quiet
 
-      - name: Build all images
-        run: docker compose build
+      - name: Build release-shaped image
+        run: |
+          docker buildx build \
+            --build-arg "VERSION=ci-${GITHUB_SHA::12}" \
+            --cache-from type=gha,scope=hoocloak-image \
+            --cache-to type=gha,mode=max,scope=hoocloak-image \
+            --output "type=oci,dest=$RUNNER_TEMP/hoocloak.oci.tar,compression=zstd,compression-level=19,force-compression=true" \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=false \
+            --sbom=false \
+            .
+
+      - name: Enforce platform and size budgets
+        run: |
+          root_index="$(tar -xOf "$RUNNER_TEMP/hoocloak.oci.tar" index.json)"
+          image_index_digest="$(jq -r '.manifests[0].digest' <<<"$root_index")"
+          image_index="$(tar -xOf "$RUNNER_TEMP/hoocloak.oci.tar" "blobs/sha256/${image_index_digest#sha256:}")"
+          mapfile -t platforms < <(
+            jq -r '.manifests[] | "\(.platform.os)/\(.platform.architecture)"' <<<"$image_index" |
+              sort
+          )
+          expected=(linux/amd64 linux/arm64)
+          test "${platforms[*]}" = "${expected[*]}"
+          while read -r platform digest; do
+            manifest="$(tar -xOf "$RUNNER_TEMP/hoocloak.oci.tar" "blobs/sha256/${digest#sha256:}")"
+            jq -e 'all(.layers[]; .mediaType == "application/vnd.oci.image.layer.v1.tar+zstd")' <<<"$manifest"
+            size="$(jq '[.layers[].size] | add' <<<"$manifest")"
+            echo "$platform: $size compressed bytes"
+            test "$size" -le "$MAX_COMPRESSED_SIZE"
+          done < <(
+            jq -r '.manifests[] | "\(.platform.os)/\(.platform.architecture) \(.digest)"' <<<"$image_index"
+          )
+
+      - name: Build example images
+        run: docker compose build api spa
 
       - name: Remove CI images
         if: always()

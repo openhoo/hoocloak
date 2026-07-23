@@ -56,8 +56,10 @@ spec:
               protocol: TCP
           {{- if .Values.startupProbe.enabled }}
           startupProbe:
-            exec:
-              command: ["/hoocloak", "health", "--url", "http://127.0.0.1:8080/ready", "--timeout", "1s"]
+            httpGet:
+              path: /ready
+              port: http
+              scheme: HTTP
             initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.startupProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
@@ -65,8 +67,10 @@ spec:
           {{- end }}
           {{- if .Values.livenessProbe.enabled }}
           livenessProbe:
-            exec:
-              command: ["/hoocloak", "health", "--url", "http://127.0.0.1:8080/ready", "--timeout", "2s"]
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: HTTP
             initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
@@ -74,8 +78,10 @@ spec:
           {{- end }}
           {{- if .Values.readinessProbe.enabled }}
           readinessProbe:
-            exec:
-              command: ["/hoocloak", "health", "--url", "http://127.0.0.1:8080/ready", "--timeout", "2s"]
+            httpGet:
+              path: /ready
+              port: http
+              scheme: HTTP
             initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
