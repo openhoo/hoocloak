@@ -1,5 +1,15 @@
 # hoocloak Changelog
 
+## 1.0.8 (2026-07-23)
+
+### Other Changes
+
+- **deps:** refresh dependencies (4b6bd8c)
+
+### Performance
+
+- **helm:** reduce default footprint (77e7fbb)
+
 ## 1.0.7 (2026-07-23)
 
 ### Performance
