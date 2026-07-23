@@ -45,12 +45,12 @@ jobs:
       contents: write
       actions: read
     outputs:
-      commit: ${{ steps.release_commit.outputs.commit }}
+      commit: ${{ steps.metadata.outputs.commit }}
       current: ${{ steps.current.outputs.current || steps.manual_current.outputs.current }}
-      published: ${{ steps.release.outputs.published }}
-      short_sha: ${{ steps.release_commit.outputs.short_sha }}
-      tag: ${{ steps.release.outputs.tag }}
-      version: ${{ steps.release.outputs.version }}
+      published: ${{ steps.metadata.outputs.published }}
+      short_sha: ${{ steps.metadata.outputs.short_sha }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -155,16 +155,69 @@ jobs:
           fi
           bun "$HOOVERSION_DIR/src/cli.ts" "${args[@]}"
 
-      - name: Resolve release commit
-        id: release_commit
-        if: steps.release.outputs.published == 'true'
+      - name: Resolve publication metadata
+        id: metadata
+        if: steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true'
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          HOOVERSION_PUBLISHED: ${{ steps.release.outputs.published }}
+          HOOVERSION_TAG: ${{ steps.release.outputs.tag }}
+          HOOVERSION_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${commit:0:7}" >> "$GITHUB_OUTPUT"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            {
+              echo "published=false"
+              echo "tag=$HOOVERSION_TAG"
+              echo "version=$HOOVERSION_VERSION"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version="$(tr -d '\r\n' < internal/version/version)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::internal/version/version contains invalid release version '$version'."
+            exit 1
+          fi
+          tag="v${version}"
+          commit="$(git rev-parse HEAD)"
+          subject="$(git log -1 --format=%s HEAD)"
+          expected_subject="chore(release): hoocloak ${version}"
+
+          if [ "$HOOVERSION_PUBLISHED" = "true" ]; then
+            if [ "$HOOVERSION_VERSION" != "$version" ] || [ "$HOOVERSION_TAG" != "$tag" ]; then
+              echo "::error::Hooversion published ${HOOVERSION_TAG:-<no tag>} (${HOOVERSION_VERSION:-<no version>}), but repository metadata resolves to $tag ($version)."
+              exit 1
+            fi
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$subject" = "$expected_subject" ]; then
+            echo "Resuming publication for existing release $tag at $commit."
+          else
+            {
+              echo "published=false"
+              echo "tag=$HOOVERSION_TAG"
+              echo "version=$HOOVERSION_VERSION"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"; then
+            echo "::error::Release tag $tag is missing from origin."
+            exit 1
+          fi
+          tag_commit="$(git rev-parse "${tag}^{commit}")"
+          if [ "$tag_commit" != "$commit" ]; then
+            echo "::error::Release tag $tag points to $tag_commit, not current HEAD $commit."
+            exit 1
+          fi
+
+          {
+            echo "commit=$commit"
+            echo "published=true"
+            echo "short_sha=${commit:0:7}"
+            echo "tag=$tag"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Remove Hooversion checkout
         if: always()

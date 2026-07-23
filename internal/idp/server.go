@@ -517,9 +517,20 @@ func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 			if !s.tokenGate(w, r) {
 				return
 			}
+		case "/oauth/introspect", "/revoke":
+			if err := r.ParseForm(); err != nil {
+				oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
+				return
+			}
+			if !rejectRepeatedFormParameters(w, r, "token", "token_type_hint", "client_id", "client_secret") {
+				return
+			}
 		case "/end_session":
 			if err := r.ParseForm(); err != nil {
 				oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
+				return
+			}
+			if !rejectRepeatedFormParameters(w, r, "id_token_hint", "post_logout_redirect_uri", "state", "client_id") {
 				return
 			}
 			if strings.TrimSpace(r.Form.Get("id_token_hint")) == "" {
@@ -540,11 +551,8 @@ func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool
 		oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
 		return false
 	}
-	for _, parameter := range []string{"client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method"} {
-		if len(r.Form[parameter]) > 1 {
-			oauthError(w, http.StatusBadRequest, "invalid_request", parameter+" must not be repeated", false)
-			return false
-		}
+	if !rejectRepeatedFormParameters(w, r, "client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method") {
+		return false
 	}
 	client := s.Store.clients[r.Form.Get("client_id")]
 	if client == nil || client.config.Type != config.ClientTypeSPA {
@@ -575,12 +583,25 @@ func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool
 	}
 	return true
 }
+func rejectRepeatedFormParameters(w http.ResponseWriter, r *http.Request, parameters ...string) bool {
+	for _, parameter := range parameters {
+		if len(r.Form[parameter]) > 1 {
+			oauthError(w, http.StatusBadRequest, "invalid_request", parameter+" must not be repeated", false)
+			return false
+		}
+	}
+	return true
+}
+
 func (s *realmServer) tokenGate(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return true
 	}
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
+		return false
+	}
+	if !rejectRepeatedFormParameters(w, r, "grant_type", "code", "client_id", "client_secret", "redirect_uri", "code_verifier", "refresh_token", "scope") {
 		return false
 	}
 	if r.Form.Get("grant_type") != "client_credentials" {
@@ -774,6 +795,12 @@ func (s *realmServer) loginPOST(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid login request", http.StatusBadRequest)
 		return
+	}
+	for _, parameter := range []string{"authRequestID", "csrf", "identity", "username", "password"} {
+		if len(r.PostForm[parameter]) > 1 {
+			http.Error(w, "invalid login request", http.StatusBadRequest)
+			return
+		}
 	}
 	id := r.PostForm.Get("authRequestID")
 	client, err := s.Store.LoginInfo(id)

@@ -233,6 +233,12 @@ pushes matching multi-platform images to `ghcr.io/openhoo/hoocloak` and
 `openhoo/hoocloak` on Docker Hub with exact, major/minor, SHA, and `latest`
 tags. Release commits do not recursively trigger another release.
 
+If chart, image, or GitHub Release publication fails after Hooversion has pushed
+the release commit and tag, rerun this workflow manually with `dry_run` disabled.
+The retry requires current `main` to have successful CI, derives the version from
+`internal/version/version`, and resumes only when its `v<version>` tag points to
+that exact release commit; missing or mismatched tags fail without publishing.
+
 ## License
 
 [MIT](LICENSE)

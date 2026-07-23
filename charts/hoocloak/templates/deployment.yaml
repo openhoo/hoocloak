@@ -104,7 +104,7 @@ spec:
           secret:
             secretName: {{ include "hoocloak.configSecretName" . }}
             items:
-              - key: {{ ternary .Values.existingConfigSecretKey "config.yaml" (ne .Values.existingConfigSecret "") }}
+              - key: {{ ternary .Values.existingConfigSecretKey "config.yaml" (ne .Values.existingConfigSecret "") | quote }}
                 path: config.yaml
         {{- if .Values.theme.existingClaim }}
         - name: theme

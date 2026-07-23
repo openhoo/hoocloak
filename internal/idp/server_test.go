@@ -286,6 +286,26 @@ func TestAuthorizeGateRejectsDuplicateSecurityParameters(t *testing.T) {
 		})
 	}
 }
+func TestMutationGatesRejectDuplicateSecurityParameters(t *testing.T) {
+	server := testServer(t, nil)
+	tests := []struct {
+		path       string
+		parameters []string
+	}{
+		{path: "/oauth/token", parameters: []string{"grant_type", "code", "client_id", "client_secret", "redirect_uri", "code_verifier", "refresh_token", "scope"}},
+		{path: "/oauth/introspect", parameters: []string{"token", "token_type_hint", "client_id", "client_secret"}},
+		{path: "/revoke", parameters: []string{"token", "token_type_hint", "client_id", "client_secret"}},
+	}
+	for _, tt := range tests {
+		for _, parameter := range tt.parameters {
+			t.Run(tt.path+" "+parameter, func(t *testing.T) {
+				form := url.Values{parameter: {"first", "second"}}
+				response := performRequest(server.Handler, http.MethodPost, tt.path, form.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+				assertInvalidAuthorizeRequest(t, response)
+			})
+		}
+	}
+}
 
 func assertInvalidAuthorizeRequest(t *testing.T, response *httptest.ResponseRecorder) {
 	t.Helper()
@@ -312,6 +332,18 @@ func TestMutationEndpointsRejectGET(t *testing.T) {
 			if allow := response.Header().Get("Allow"); allow != http.MethodPost {
 				t.Fatalf("Allow = %q, want POST", allow)
 			}
+		})
+	}
+}
+
+func TestLogoutGateRejectsDuplicateSecurityParameters(t *testing.T) {
+	server := testServer(t, nil)
+	for _, parameter := range []string{"id_token_hint", "post_logout_redirect_uri", "state", "client_id"} {
+		t.Run(parameter, func(t *testing.T) {
+			form := url.Values{"id_token_hint": {"token"}}
+			form[parameter] = []string{"first", "second"}
+			response := performRequest(server.Handler, http.MethodPost, "/end_session", form.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+			assertInvalidAuthorizeRequest(t, response)
 		})
 	}
 }
@@ -701,6 +733,34 @@ func TestLoginCSRFCookiesAreIsolatedPerAuthorizationRequest(t *testing.T) {
 		t.Fatalf("first parallel login POST = %d, body=%s", response.Code, response.Body.String())
 	}
 }
+func TestLoginRejectsDuplicateSecurityParameters(t *testing.T) {
+	server := testServer(t, nil)
+	server.Store.authRequests["request-id"] = &AuthRequest{id: "request-id", clientID: "react-spa", expires: time.Now().Add(5 * time.Minute)}
+	page := performRequest(server.Handler, http.MethodGet, "/login?authRequestID=request-id", "", nil)
+	cookies := page.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("GET login set %d cookies", len(cookies))
+	}
+	valid := url.Values{"authRequestID": {"request-id"}, "csrf": {cookies[0].Value}, "identity": {"alice"}, "username": {"alice"}, "password": {"wrong-password"}}
+	for _, parameter := range []string{"authRequestID", "csrf", "identity", "username", "password"} {
+		t.Run(parameter, func(t *testing.T) {
+			form := make(url.Values, len(valid)+1)
+			for key, values := range valid {
+				form[key] = slices.Clone(values)
+			}
+			form.Add(parameter, "attacker-value")
+			request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.AddCookie(cookies[0])
+			response := httptest.NewRecorder()
+			server.Handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestIdentitySelectionLogin(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.LoginMode = config.LoginModeSelect
