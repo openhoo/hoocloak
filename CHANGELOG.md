@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 1.0.4 (2026-07-23)
+
+### Bug Fixes
+
+- close remaining security edges (dcdc359)
+
 ## 1.0.3 (2026-07-23)
 
 ### Other Changes
