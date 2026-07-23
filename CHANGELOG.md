@@ -1,5 +1,15 @@
 # hoocloak Changelog
 
+## 0.2.0 (2026-07-23)
+
+### Features
+
+- add selectable dev identities (8218ff5)
+
+### Bug Fixes
+
+- align example SPA origin (4c4c881)
+
 ## Unreleased
 
 ### Features
