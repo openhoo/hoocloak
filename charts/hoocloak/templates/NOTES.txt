@@ -1,5 +1,6 @@
-Hoocloak is available inside the cluster at:
-  http://{{ include "hoocloak.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/
+Hoocloak operational endpoints inside the cluster:
+  Readiness: http://{{ include "hoocloak.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/ready
+  Health:    http://{{ include "hoocloak.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/healthz
 
 {{- if .Values.ingress.enabled }}
 Configured ingress hosts:
@@ -10,7 +11,11 @@ Configured ingress hosts:
 For local access:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hoocloak.fullname" . }} 8080:{{ .Values.service.port }}
 {{- end }}
+Run the Helm readiness test:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+The test verifies only in-cluster Service readiness. It does not verify discovery, login, or token issuance.
 
 The configured base_url must be the exact external root URL and must end in /.
-Each realm issuer is base_url followed by realms/<realm-name>.
+Each realm issuer is base_url followed by realms/<realm-name> (for example, /realms/<realm-name> relative to the external root).
 Hoocloak is development-only and deliberately restricted to one replica because signing keys and sessions are in memory.

@@ -1,5 +1,7 @@
 # hoocloak Changelog
 
+## Unreleased
+
 ## 1.0.8 (2026-07-23)
 
 ### Other Changes
@@ -43,8 +45,6 @@
 ### Bug Fixes
 
 - harden protocol and deployment edges (3423018)
-
-## Unreleased
 
 ## 1.0.2 (2026-07-23)
 
