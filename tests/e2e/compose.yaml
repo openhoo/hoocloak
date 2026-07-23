@@ -1,41 +1,39 @@
 services:
   hoocloak:
-    image: hoocloak:e2e
     build:
       context: ../..
     command: ["serve", "--config", "/etc/hoocloak/config.yaml"]
     environment:
       HOOCLOAK_LOGIN_MODE: ${HOOCLOAK_LOGIN_MODE:-password}
     volumes:
-      - ./hoocloak.yaml:/etc/hoocloak/config.yaml:ro
+      - ${E2E_CONFIG_PATH}:/etc/hoocloak/config.yaml:ro
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "/hoocloak", "health", "--url", "http://127.0.0.1:18080/ready", "--timeout", "2s"]
+      test: ["CMD", "/hoocloak", "health", "--url", "http://127.0.0.1:${E2E_PROVIDER_PORT}/ready", "--timeout", "2s"]
       interval: 2s
       timeout: 3s
       retries: 30
       start_period: 2s
     ports:
-      - "127.0.0.1:18080:18080"
+      - "127.0.0.1:${E2E_PROVIDER_PORT}:${E2E_PROVIDER_PORT}"
     networks:
       default:
         aliases:
           - hoocloak.localhost
 
   api:
-    image: hoocloak-api:e2e
     build:
       context: ../../examples/aspnet-api
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_HTTP_PORTS: "15099"
-      Oidc__Authority: http://hoocloak.localhost:18080/realms/development
+      Oidc__Authority: ${E2E_PROVIDER_ORIGIN}/realms/development
       Oidc__Audience: hoocloak-api
-      Cors__Origin: http://localhost:13000
+      Cors__Origin: ${E2E_SPA_ORIGIN}
     read_only: true
     cap_drop:
       - ALL
@@ -50,18 +48,17 @@ services:
       retries: 30
       start_period: 2s
     ports:
-      - "127.0.0.1:15099:15099"
+      - "127.0.0.1:${E2E_API_PORT}:15099"
     depends_on:
       hoocloak:
         condition: service_healthy
 
   spa:
-    image: hoocloak-spa:e2e
     build:
       context: ../../examples/react-spa
       args:
-        VITE_OIDC_AUTHORITY: http://hoocloak.localhost:18080/realms/development
-        VITE_API_BASE_URL: http://api.localhost:15099
+        VITE_OIDC_AUTHORITY: ${E2E_PROVIDER_ORIGIN}/realms/development
+        VITE_API_BASE_URL: ${E2E_API_ORIGIN}
     read_only: true
     cap_drop:
       - ALL
@@ -76,7 +73,7 @@ services:
       retries: 30
       start_period: 2s
     ports:
-      - "127.0.0.1:13000:5173"
+      - "127.0.0.1:${E2E_SPA_PORT}:5173"
     depends_on:
       hoocloak:
         condition: service_healthy

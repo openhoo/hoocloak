@@ -1,8 +1,11 @@
 package idp
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -19,6 +22,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/openhoo/hoocloak/internal/config"
@@ -207,6 +211,106 @@ func TestApplicationOwnedProtocolGates(t *testing.T) {
 				t.Fatalf("WWW-Authenticate = %q, want Basic challenge", response.Header().Get("WWW-Authenticate"))
 			}
 		})
+	}
+}
+
+func TestAuthorizeGateValidatesPostedParameters(t *testing.T) {
+	server := testServer(t, nil)
+	valid := url.Values{
+		"client_id": {"react-spa"}, "response_type": {"code"}, "scope": {"openid"},
+		"redirect_uri": {"http://app.localhost:5173/auth/callback"}, "code_challenge": {"value"}, "code_challenge_method": {"S256"},
+	}
+	tests := []struct {
+		name, field, value, errorCode string
+	}{
+		{name: "missing PKCE", field: "code_challenge", errorCode: "invalid_request"},
+		{name: "plain PKCE", field: "code_challenge_method", value: "plain", errorCode: "invalid_request"},
+		{name: "disallowed scope", field: "scope", value: "openid api.write", errorCode: "invalid_scope"},
+		{name: "response type", field: "response_type", value: "token", errorCode: "invalid_request"},
+		{name: "response mode", field: "response_mode", value: "form_post", errorCode: "invalid_request"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			form := make(url.Values, len(valid))
+			for key, values := range valid {
+				form[key] = slices.Clone(values)
+			}
+			if tt.value == "" {
+				form.Del(tt.field)
+			} else {
+				form.Set(tt.field, tt.value)
+			}
+			response := performRequest(server.Handler, http.MethodPost, "/authorize", form.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", response.Code, response.Body.String())
+			}
+			var oauthResponse map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &oauthResponse); err != nil {
+				t.Fatal(err)
+			}
+			if oauthResponse["error"] != tt.errorCode {
+				t.Fatalf("error = %q, want %q", oauthResponse["error"], tt.errorCode)
+			}
+		})
+	}
+}
+
+func TestMutationEndpointsRejectGET(t *testing.T) {
+	server := testServer(t, nil)
+	for _, path := range []string{"/oauth/token", "/oauth/introspect", "/revoke"} {
+		t.Run(path, func(t *testing.T) {
+			response := performRequest(server.Handler, http.MethodGet, path, "", nil)
+			if response.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405; body=%s", response.Code, response.Body.String())
+			}
+			if allow := response.Header().Get("Allow"); allow != http.MethodPost {
+				t.Fatalf("Allow = %q, want POST", allow)
+			}
+		})
+	}
+}
+
+func TestFailedAuthorizationCodeExchangeCanRetry(t *testing.T) {
+	server := testServer(t, nil)
+	verifier := "correct-verifier"
+	digest := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
+	request := &AuthRequest{
+		id: "request-id", clientID: "react-spa", redirectURI: "http://app.localhost:5173/auth/callback",
+		subject: "alice", done: true, expires: time.Now().Add(5 * time.Minute), scopes: []string{"openid", "api.read"},
+		audience: []string{"hoocloak-api"}, authTime: time.Now(), amr: []string{"pwd"},
+		codeChallenge: &oidc.CodeChallenge{Challenge: challenge, Method: oidc.CodeChallengeMethodS256},
+	}
+	server.Store.authRequests[request.id] = request
+	if err := server.Store.SaveAuthCode(context.Background(), request.id, "retryable-code"); err != nil {
+		t.Fatal(err)
+	}
+	exchange := func(codeVerifier, clientID, redirectURI string) *httptest.ResponseRecorder {
+		form := url.Values{
+			"grant_type": {"authorization_code"}, "code": {"retryable-code"}, "client_id": {clientID},
+			"redirect_uri": {redirectURI}, "code_verifier": {codeVerifier},
+		}
+		return performRequest(server.Handler, http.MethodPost, "/oauth/token", form.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	}
+	for _, failed := range []struct{ name, verifier, clientID, redirectURI string }{
+		{name: "verifier", verifier: "wrong-verifier", clientID: "react-spa", redirectURI: request.redirectURI},
+		{name: "client", verifier: verifier, clientID: "missing-client", redirectURI: request.redirectURI},
+		{name: "redirect", verifier: verifier, clientID: "react-spa", redirectURI: "http://app.localhost:5173/wrong"},
+	} {
+		t.Run(failed.name, func(t *testing.T) {
+			response := exchange(failed.verifier, failed.clientID, failed.redirectURI)
+			if response.Code == http.StatusOK {
+				t.Fatalf("invalid exchange succeeded: %s", response.Body.String())
+			}
+		})
+	}
+	response := exchange(verifier, "react-spa", request.redirectURI)
+	if response.Code != http.StatusOK {
+		t.Fatalf("valid retry status = %d, body=%s", response.Code, response.Body.String())
+	}
+	second := exchange(verifier, "react-spa", request.redirectURI)
+	if second.Code == http.StatusOK {
+		t.Fatalf("authorization code redeemed twice: %s", second.Body.String())
 	}
 }
 
@@ -836,5 +940,24 @@ func TestExternalLoginThemeRejectsExecutionErrorsAtStartup(t *testing.T) {
 	_, _, err := loadUI(themeDir)
 	if err == nil || !strings.Contains(err.Error(), "execute login.html") {
 		t.Fatalf("loadUI() error = %v, want login execution error", err)
+	}
+}
+
+func TestExternalLoginThemePreflightsSelectMode(t *testing.T) {
+	themeDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(themeDir, "assets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{
+		"login.html":      `<!doctype html><form action="{{.BasePath}}/login">{{if eq .Mode "select"}}{{(index .Identities 0).MissingField}}{{end}}</form>`,
+		"logged-out.html": `<!doctype html><title>Signed out</title>`,
+	} {
+		if err := os.WriteFile(filepath.Join(themeDir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, err := loadUI(themeDir)
+	if err == nil || !strings.Contains(err.Error(), "login select mode") {
+		t.Fatalf("loadUI() error = %v, want select-mode execution error", err)
 	}
 }

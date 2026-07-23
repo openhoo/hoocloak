@@ -1,5 +1,6 @@
 using System.Net;
 using System.Security.Claims;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
@@ -23,7 +24,7 @@ builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        options.Authority = authority;
+        options.Authority = authorityUri.AbsoluteUri.TrimEnd('/');
         options.Audience = audience;
         options.MapInboundClaims = false;
         options.IncludeErrorDetails = builder.Environment.IsDevelopment();
@@ -142,6 +143,15 @@ static Uri ValidateAuthority(string authority, bool isDevelopment)
         || !string.IsNullOrEmpty(uri.Fragment))
     {
         throw new InvalidOperationException("Oidc:Authority must be an absolute URL without credentials, query, or fragment.");
+    }
+
+    if (!Regex.IsMatch(
+            uri.AbsolutePath,
+            "^/realms/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?/?$",
+            RegexOptions.CultureInvariant))
+    {
+        throw new InvalidOperationException(
+            "Oidc:Authority path must be exactly /realms/<realm>, where the realm matches ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$.");
     }
 
     if (uri.Scheme == Uri.UriSchemeHttps)

@@ -217,21 +217,27 @@ func loadUI(themeDir string) (*template.Template, fs.FS, error) {
 
 func preflightUITemplates(templates *template.Template) error {
 	const basePath = "/realms/hoocloak-theme-preflight"
-	login := loginData{
+	identity := loginIdentity{ID: "user-id", Username: "username", Name: "Example User", Email: "user@example.test"}
+	password := loginData{
 		BasePath: basePath, RequestID: "request-id", Client: "Example client", CSRF: "csrf-token",
 		Mode: config.LoginModePassword, Username: "username", Error: "invalid credentials",
-		Identities: []loginIdentity{{ID: "user-id", Username: "username", Name: "Example User", Email: "user@example.test"}},
+	}
+	selection := loginData{
+		BasePath: basePath, RequestID: "request-id", Client: "Example client", CSRF: "csrf-token",
+		Mode: config.LoginModeSelect, SelectedID: identity.ID, Error: "select a valid identity",
+		Identities: []loginIdentity{identity},
 	}
 	for _, check := range []struct {
-		name string
-		data any
-	}{{name: "login", data: login}, {name: "logged-out", data: loggedOutData{BasePath: basePath}}} {
+		name     string
+		template string
+		data     any
+	}{{name: "login", template: "login", data: password}, {name: "login select mode", template: "login", data: selection}, {name: "logged-out", template: "logged-out", data: loggedOutData{BasePath: basePath}}} {
 		var rendered bytes.Buffer
-		if err := templates.ExecuteTemplate(&rendered, check.name, check.data); err != nil {
+		if err := templates.ExecuteTemplate(&rendered, check.template, check.data); err != nil {
 			return fmt.Errorf("execute %s.html: %w", check.name, err)
 		}
 		output := rendered.String()
-		if check.name == "login" && !strings.Contains(output, basePath+"/login") {
+		if check.template == "login" && !strings.Contains(output, basePath+"/login") {
 			return errors.New("execute login.html: login form action must use .BasePath")
 		}
 		for _, rootRelative := range []string{`="/login`, `='/login`, `="/assets/`, `='/assets/`} {
@@ -308,9 +314,17 @@ func discoveryMetadata(issuer string, scopes []string) map[string]any {
 
 func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token", "/oauth/introspect", "/revoke":
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodPost)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+		}
 		if r.Method == http.MethodPost {
 			switch r.URL.Path {
-			case "/oauth/token", "/oauth/introspect", "/revoke", "/end_session":
+			case "/authorize", "/oauth/token", "/oauth/introspect", "/revoke", "/end_session":
 				r.Body = http.MaxBytesReader(w, r.Body, maxFormBodyBytes)
 			}
 		}
@@ -342,20 +356,23 @@ func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 }
 
 func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool {
-	query := r.URL.Query()
-	client := s.Store.clients[query.Get("client_id")]
+	if err := r.ParseForm(); err != nil {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
+		return false
+	}
+	client := s.Store.clients[r.Form.Get("client_id")]
 	if client == nil || client.config.Type != config.ClientTypeSPA {
 		return true
 	}
-	if query.Get("response_type") != "code" {
+	if r.Form.Get("response_type") != "code" {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "response_type must be code", false)
 		return false
 	}
-	if mode := query.Get("response_mode"); mode != "" && mode != "query" {
+	if mode := r.Form.Get("response_mode"); mode != "" && mode != "query" {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "response_mode must be query", false)
 		return false
 	}
-	scopes := strings.Fields(query.Get("scope"))
+	scopes := strings.Fields(r.Form.Get("scope"))
 	if !slices.Contains(scopes, oidc.ScopeOpenID) {
 		oauthError(w, http.StatusBadRequest, "invalid_scope", "openid is required", false)
 		return false
@@ -366,7 +383,7 @@ func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool
 			return false
 		}
 	}
-	if query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256" {
+	if r.Form.Get("code_challenge") == "" || r.Form.Get("code_challenge_method") != "S256" {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "PKCE with code_challenge_method=S256 is required", false)
 		return false
 	}

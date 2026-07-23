@@ -27,6 +27,30 @@
 {{- end -}}
 {{- end }}
 
+{{- define "hoocloak.validateIngress" -}}
+{{- $baseURL := required "hoocloakConfig.base_url is required when ingress is enabled" .Values.hoocloakConfig.base_url -}}
+{{- range .Values.ingress.hosts -}}
+{{- $host := required "ingress host must not be empty" .host -}}
+{{- if ne $baseURL (printf "https://%s/" $host) -}}
+{{- fail (printf "hoocloakConfig.base_url must be the root HTTPS URL https://%s/ for ingress host %s" $host $host) -}}
+{{- end -}}
+{{- range .paths -}}
+{{- if or (ne .path "/") (ne .pathType "Prefix") -}}
+{{- fail "ingress routes support only path / with pathType Prefix" -}}
+{{- end -}}
+{{- end -}}
+{{- $covered := false -}}
+{{- range $.Values.ingress.tls -}}
+{{- if has $host (default (list) .hosts) -}}
+{{- $covered = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $covered -}}
+{{- fail (printf "ingress TLS must cover host %s" $host) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "hoocloak.validateValues" -}}
 {{- if hasKey .Values.podLabels "app.kubernetes.io/name" -}}
 {{- fail "podLabels must not override app.kubernetes.io/name" -}}

@@ -1,10 +1,17 @@
-import type { Page } from "@playwright/test";
+import type { APIRequestContext, Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
 
-const app = "http://localhost:13000";
-const provider = "http://hoocloak.localhost:18080";
+const app =
+  process.env.E2E_SPA_ORIGIN ??
+  `http://localhost:${process.env.E2E_SPA_PORT ?? "13000"}`;
+const provider =
+  process.env.E2E_PROVIDER_ORIGIN ??
+  `http://hoocloak.localhost:${process.env.E2E_PROVIDER_PORT ?? "18080"}`;
 const issuer = `${provider}/realms/development`;
-const api = "http://api.localhost:15099";
+const partnerIssuer = `${provider}/realms/partner`;
+const api =
+  process.env.E2E_API_ORIGIN ??
+  `http://api.localhost:${process.env.E2E_API_PORT ?? "15099"}`;
 
 async function signIn(page: Page, username: string, password: string) {
   await page.goto("/");
@@ -37,6 +44,28 @@ async function callEndpoint(
   await card.getByRole("button", { name: "Call endpoint" }).click();
   await expect(card.locator(".response > strong")).toHaveText(String(status));
   return card.locator("pre");
+}
+
+async function serviceAccessToken(
+  request: APIRequestContext,
+  tokenIssuer: string,
+  clientId: string,
+  secret: string,
+  scope: string,
+) {
+  const tokenResponse = await request.post(`${tokenIssuer}/oauth/token`, {
+    form: { grant_type: "client_credentials", scope },
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${clientId}:${secret}`).toString("base64")}`,
+    },
+  });
+  expect(tokenResponse.ok()).toBeTruthy();
+  return (await tokenResponse.json()) as {
+    access_token: string;
+    expires_in: number;
+    scope: string;
+    token_type: string;
+  };
 }
 
 test("public stack, security headers, discovery, and unauthenticated API are healthy", async ({
@@ -100,7 +129,7 @@ test("invalid password is rejected without losing entered username", async ({
   await expect(page.getByLabel("Password")).toHaveAttribute("aria-invalid", "true");
 });
 
-test("Alice can authenticate, renew, access profile and admin, then sign out", async ({
+test("Alice can authenticate, renew, access APIs, then logout revokes provider state but not the unexpired self-contained JWT", async ({
   page,
   request,
   browserMonitor: _browserMonitor,
@@ -152,6 +181,16 @@ test("Alice can authenticate, renew, access profile and admin, then sign out", a
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   expect(revokedToken.status()).toBe(401);
+
+  // Resource servers validate the signed JWT locally; provider-side revocation is not introspected.
+  const locallyValidatedToken = await request.get(`${api}/api/profile`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  expect(locallyValidatedToken.ok()).toBeTruthy();
+  expect(await locallyValidatedToken.json()).toMatchObject({
+    sub: "alice",
+    name: "Alice Admin",
+  });
 });
 
 test("Bob can access profile but is forbidden from admin", async ({
@@ -170,25 +209,16 @@ test("Bob can access profile but is forbidden from admin", async ({
   await expect(admin).not.toContainText("Admin access granted.");
 });
 
-test("service account receives a scoped token accepted by resource server", async ({
+test("resource server accepts only the development issuer and hoocloak-api audience", async ({
   request,
 }) => {
-  const tokenResponse = await request.post(`${issuer}/oauth/token`, {
-    form: {
-      grant_type: "client_credentials",
-      scope: "api.read",
-    },
-    headers: {
-      Authorization: `Basic ${Buffer.from("example-worker:dev-secret").toString("base64")}`,
-    },
-  });
-  expect(tokenResponse.ok()).toBeTruthy();
-  const token = (await tokenResponse.json()) as {
-    access_token: string;
-    expires_in: number;
-    scope: string;
-    token_type: string;
-  };
+  const token = await serviceAccessToken(
+    request,
+    issuer,
+    "example-worker",
+    "dev-secret",
+    "api.read",
+  );
   expect(token).toMatchObject({
     scope: "api.read",
     token_type: "Bearer",
@@ -210,4 +240,30 @@ test("service account receives a scoped token accepted by resource server", asyn
     headers: { Authorization: `Bearer ${token.access_token}` },
   });
   expect(admin.status()).toBe(403);
+
+  const partnerToken = await serviceAccessToken(
+    request,
+    partnerIssuer,
+    "example-worker",
+    "partner-secret",
+    "partner.read",
+  );
+  // The audience is valid for this API, so this rejection specifically defends issuer isolation.
+  const partnerProfile = await request.get(`${api}/api/profile`, {
+    headers: { Authorization: `Bearer ${partnerToken.access_token}` },
+  });
+  expect(partnerProfile.status()).toBe(401);
+
+  const wrongAudienceToken = await serviceAccessToken(
+    request,
+    issuer,
+    "wrong-audience-worker",
+    "dev-secret",
+    "api.read",
+  );
+  // The issuer is valid for this API, so this rejection specifically defends audience isolation.
+  const wrongAudienceProfile = await request.get(`${api}/api/profile`, {
+    headers: { Authorization: `Bearer ${wrongAudienceToken.access_token}` },
+  });
+  expect(wrongAudienceProfile.status()).toBe(401);
 });

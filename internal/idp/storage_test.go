@@ -67,7 +67,7 @@ func BenchmarkRevokeFamilyWithManyFamilies(b *testing.B) {
 	}
 }
 
-func TestAuthorizationCodeIsConsumedExactlyOnce(t *testing.T) {
+func TestAuthorizationCodeCommitsExactlyOnce(t *testing.T) {
 	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
 	store := newTestStore(t, clock)
 	request := &AuthRequest{
@@ -94,16 +94,62 @@ func TestAuthorizationCodeIsConsumedExactlyOnce(t *testing.T) {
 	}
 	first, err := store.AuthRequestByCode(context.Background(), "one-time-code")
 	if err != nil || first.GetID() != request.id {
-		t.Fatalf("first code redemption = (%v, %v)", first, err)
+		t.Fatalf("first code lookup = (%v, %v)", first, err)
+	}
+	if retry, err := store.AuthRequestByCode(context.Background(), "one-time-code"); err != nil || retry.GetID() != request.id {
+		t.Fatalf("uncommitted code lookup = (%v, %v)", retry, err)
+	}
+	if _, _, err := store.CreateAccessToken(context.Background(), first); err != nil {
+		t.Fatalf("reserve authorization code: %v", err)
+	}
+	if err := store.DeleteAuthRequest(context.Background(), request.id); err != nil {
+		t.Fatalf("commit authorization code: %v", err)
 	}
 	if _, err := store.AuthRequestByCode(context.Background(), "one-time-code"); err == nil {
-		t.Fatal("second code redemption unexpectedly succeeded")
+		t.Fatal("committed authorization code remained available")
 	}
 	if _, err := store.AuthRequestByCode(context.Background(), "second-code"); err == nil {
 		t.Fatal("rejected second code was stored")
 	}
 	if redeemed, err := store.AuthRequestByCode(context.Background(), "other-code"); err != nil || redeemed.GetID() != other.id {
-		t.Fatalf("other code redemption = (%v, %v)", redeemed, err)
+		t.Fatalf("other code lookup = (%v, %v)", redeemed, err)
+	}
+}
+
+func TestConcurrentAuthorizationCodeCommitSucceedsOnce(t *testing.T) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := newTestStore(t, clock)
+	request := &AuthRequest{id: "request-id", clientID: "react-spa", subject: "alice", done: true, expires: clock.Now().Add(5 * time.Minute), scopes: []string{"openid"}}
+	store.authRequests[request.id] = request
+	if err := store.SaveAuthCode(context.Background(), request.id, "one-time-code"); err != nil {
+		t.Fatal(err)
+	}
+
+	const attempts = 16
+	start := make(chan struct{})
+	results := make(chan error, attempts)
+	for range attempts {
+		go func() {
+			<-start
+			auth, err := store.AuthRequestByCode(context.Background(), "one-time-code")
+			if err == nil {
+				_, _, err = store.CreateAccessToken(context.Background(), auth)
+			}
+			if err == nil {
+				err = store.DeleteAuthRequest(context.Background(), request.id)
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	successes := 0
+	for range attempts {
+		if <-results == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful commits = %d, want 1", successes)
 	}
 }
 
@@ -201,10 +247,22 @@ func TestRefreshRotationAndAncestorReplayRevokesFamily(t *testing.T) {
 	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
 	store := newTestStore(t, clock)
 	request := &AuthRequest{
-		clientID: "react-spa", subject: "alice", audience: []string{"hoocloak-api"},
+		id: "refresh-family-request", clientID: "react-spa", subject: "alice", audience: []string{"hoocloak-api"},
 		scopes: []string{"openid", "offline_access", "api.read"}, authTime: clock.Now(), amr: []string{"pwd"},
+		done: true, expires: clock.Now().Add(5 * time.Minute),
 	}
-	firstAccess, firstRefresh, _, err := store.CreateAccessAndRefreshTokens(context.Background(), request, "")
+	store.authRequests[request.id] = request
+	if err := store.SaveAuthCode(context.Background(), request.id, "refresh-family-code"); err != nil {
+		t.Fatalf("save authorization code: %v", err)
+	}
+	tokenRequest, err := store.AuthRequestByCode(context.Background(), "refresh-family-code")
+	if err != nil {
+		t.Fatalf("read authorization code: %v", err)
+	}
+	firstAccess, firstRefresh, _, err := store.CreateAccessAndRefreshTokens(context.Background(), tokenRequest, "")
+	if err == nil {
+		err = store.DeleteAuthRequest(context.Background(), request.id)
+	}
 	if err != nil {
 		t.Fatalf("create refresh family: %v", err)
 	}
@@ -241,10 +299,22 @@ func TestRefreshFamilyUsesNonSlidingAbsoluteExpiry(t *testing.T) {
 	clock := &fakeClock{current: start}
 	store := newTestStore(t, clock)
 	request := &AuthRequest{
-		clientID: "react-spa", subject: "alice", audience: []string{"hoocloak-api"},
+		id: "absolute-expiry-request", clientID: "react-spa", subject: "alice", audience: []string{"hoocloak-api"},
 		scopes: []string{"openid", "offline_access", "api.read"}, authTime: start, amr: []string{"pwd"},
+		done: true, expires: clock.Now().Add(5 * time.Minute),
 	}
-	_, firstRefresh, _, err := store.CreateAccessAndRefreshTokens(context.Background(), request, "")
+	store.authRequests[request.id] = request
+	if err := store.SaveAuthCode(context.Background(), request.id, "absolute-expiry-code"); err != nil {
+		t.Fatalf("save authorization code: %v", err)
+	}
+	tokenRequest, err := store.AuthRequestByCode(context.Background(), "absolute-expiry-code")
+	if err != nil {
+		t.Fatalf("read authorization code: %v", err)
+	}
+	_, firstRefresh, _, err := store.CreateAccessAndRefreshTokens(context.Background(), tokenRequest, "")
+	if err == nil {
+		err = store.DeleteAuthRequest(context.Background(), request.id)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

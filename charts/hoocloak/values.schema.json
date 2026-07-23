@@ -22,10 +22,9 @@
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["create", "automount", "annotations", "name"],
+      "required": ["create", "annotations", "name"],
       "properties": {
         "create": { "type": "boolean" },
-        "automount": { "type": "boolean" },
         "annotations": { "type": "object" },
         "name": { "type": "string" }
       }
@@ -69,8 +68,8 @@
                   "additionalProperties": false,
                   "required": ["path", "pathType"],
                   "properties": {
-                    "path": { "type": "string", "pattern": "^/" },
-                    "pathType": { "type": "string", "enum": ["Exact", "Prefix", "ImplementationSpecific"] }
+                    "path": { "type": "string", "const": "/" },
+                    "pathType": { "type": "string", "const": "Prefix" }
                   }
                 }
               }

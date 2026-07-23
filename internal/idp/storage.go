@@ -64,6 +64,7 @@ type Store struct {
 type codeRecord struct {
 	requestID string
 	expires   time.Time
+	reserved  bool
 }
 type accessRecord struct {
 	id, clientID, subject       string
@@ -241,10 +242,9 @@ func (s *Store) AuthRequestByCode(_ context.Context, code string) (op.AuthReques
 	now := s.now()
 	s.pruneLocked(now)
 	record, ok := s.codes[code]
-	if !ok {
+	if !ok || record.reserved {
 		return nil, oidc.ErrInvalidGrant()
 	}
-	delete(s.codes, code)
 	request, ok := s.authRequests[record.requestID]
 	if !ok || !request.done || !now.Before(record.expires) {
 		return nil, oidc.ErrInvalidGrant()
@@ -274,9 +274,15 @@ func (s *Store) SaveAuthCode(_ context.Context, requestID, code string) error {
 func (s *Store) DeleteAuthRequest(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if request := s.authRequests[id]; request != nil && request.code != "" {
-		delete(s.codes, request.code)
+	request := s.authRequests[id]
+	if request == nil || request.code == "" {
+		return oidc.ErrInvalidGrant()
 	}
+	record, ok := s.codes[request.code]
+	if !ok || record.requestID != id || !record.reserved {
+		return oidc.ErrInvalidGrant()
+	}
+	delete(s.codes, request.code)
 	delete(s.authRequests, id)
 	return nil
 }
@@ -374,6 +380,24 @@ func (s *Store) LoginInfo(requestID string) (string, error) {
 	return client.config.ID, nil
 }
 
+func (s *Store) reserveAuthorizationCodeLocked(request op.TokenRequest) error {
+	auth, ok := request.(*AuthRequest)
+	if !ok {
+		return nil
+	}
+	stored := s.authRequests[auth.id]
+	if stored != auth || auth.code == "" {
+		return oidc.ErrInvalidGrant()
+	}
+	record, ok := s.codes[auth.code]
+	if !ok || record.requestID != auth.id || record.reserved {
+		return oidc.ErrInvalidGrant()
+	}
+	record.reserved = true
+	s.codes[auth.code] = record
+	return nil
+}
+
 func (s *Store) CreateAccessToken(_ context.Context, request op.TokenRequest) (string, time.Time, error) {
 	return s.createAccessToken(request, "")
 }
@@ -394,6 +418,9 @@ func (s *Store) createAccessToken(request op.TokenRequest, familyID string) (str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
+	if err := s.reserveAuthorizationCodeLocked(request); err != nil {
+		return "", time.Time{}, err
+	}
 	s.access[id] = record
 	s.scheduleExpiryLocked(expires)
 	return id, expires, nil
@@ -419,6 +446,9 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
+	if err := s.reserveAuthorizationCodeLocked(request); err != nil {
+		return "", "", time.Time{}, err
+	}
 	var family *refreshFamily
 	if current == "" {
 		familyID, e := randomID()

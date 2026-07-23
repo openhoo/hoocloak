@@ -1,5 +1,27 @@
 import { expect, test as base } from "@playwright/test";
 
+function origin(originName: string, portName: string, hostname: string, fallbackPort: number): string {
+  const configuredOrigin = process.env[originName];
+  if (configuredOrigin !== undefined) {
+    return configuredOrigin;
+  }
+  return `http://${hostname}:${process.env[portName] ?? fallbackPort}`;
+}
+
+export const appOrigin = origin("E2E_SPA_ORIGIN", "E2E_SPA_PORT", "localhost", 13_000);
+export const providerOrigin = origin(
+  "E2E_PROVIDER_ORIGIN",
+  "E2E_PROVIDER_PORT",
+  "hoocloak.localhost",
+  18_080,
+);
+export const apiOrigin = origin(
+  "E2E_API_ORIGIN",
+  "E2E_API_PORT",
+  "api.localhost",
+  15_099,
+);
+
 type BrowserMonitor = {
   expectHttpError(status: number, url: string): void;
 };

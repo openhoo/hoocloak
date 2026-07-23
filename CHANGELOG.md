@@ -1,5 +1,7 @@
 # hoocloak Changelog
 
+## Unreleased
+
 ## 1.0.2 (2026-07-23)
 
 ### Other Changes
@@ -44,13 +46,6 @@
 ### Bug Fixes
 
 - align example SPA origin (4c4c881)
-
-## Unreleased
-
-### Features
-
-- add environment-selectable development identity login
-- add a hardened single-replica Helm chart
 
 ## 0.1.2 (2026-07-15)
 
