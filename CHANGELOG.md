@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 1.0.7 (2026-07-23)
+
+### Performance
+
+- add benchmark suite (7c61951)
+
 ## 1.0.6 (2026-07-23)
 
 ### Bug Fixes
