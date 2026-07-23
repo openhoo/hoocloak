@@ -200,7 +200,8 @@ Every commit must use the Conventional Commits format. After CI succeeds on
 
 The release workflow updates `internal/version/version` and `CHANGELOG.md`,
 creates a `chore(release):` commit, tags it, publishes a GitHub Release, and
-pushes `ghcr.io/openhoo/hoocloak` with exact, major/minor, SHA, and `latest`
+pushes matching multi-platform images to `ghcr.io/openhoo/hoocloak` and
+`openhoo/hoocloak` on Docker Hub with exact, major/minor, SHA, and `latest`
 tags. Release commits do not recursively trigger another release.
 
 ## License
