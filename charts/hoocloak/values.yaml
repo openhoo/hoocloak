@@ -26,7 +26,7 @@ podSecurityContext:
   runAsUser: 65532
   runAsGroup: 65532
   fsGroup: 65532
-  # Avoid recursively changing an already-correct external theme volume.
+# Avoid recursively changing an already-correct mounted volume.
   fsGroupChangePolicy: OnRootMismatch
   seccompProfile:
     type: RuntimeDefault
@@ -108,14 +108,24 @@ existingConfigSecretVersion: ""
 # It asserts the base_url stored in the external Secret without reading Secret content.
 existingConfigBaseURL: ""
 
-# Mount an existing PVC containing an external login theme. The mount path and
-# read-only mode are fixed. With inline configuration, hoocloakConfig.ui.theme_dir
-# must equal theme.mountPath. With existingConfigSecret, its external configuration
-# must set ui.theme_dir to /etc/hoocloak/theme when this claim is configured.
+# Populate an external login theme from a dedicated OCI image without persistent
+# storage. The image must contain /bin/cp and the complete theme below /theme.
+# Pin reference by digest for reproducible deployments. Hoocloak mounts the
+# Pod-local copy read-only at /etc/hoocloak/theme and selects it automatically.
 theme:
-  existingClaim: ""
+  image:
+    reference: ""
+    pullPolicy: IfNotPresent
+  sourcePath: /theme
   mountPath: /etc/hoocloak/theme
-  readOnly: true
+  emptyDir:
+    sizeLimit: 16Mi
+  resources:
+    requests:
+      cpu: 1m
+      memory: 4Mi
+    limits:
+      memory: 16Mi
 
 # Ignored when existingConfigSecret is set. Passwords and client secrets must be
 # bcrypt hashes generated with `hoocloak hash`; never put plaintext credentials here.

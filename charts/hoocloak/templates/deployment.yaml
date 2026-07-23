@@ -37,6 +37,25 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.theme.image.reference }}
+      initContainers:
+        - name: install-theme
+          image: {{ .Values.theme.image.reference | quote }}
+          imagePullPolicy: {{ .Values.theme.image.pullPolicy }}
+          command:
+            - /bin/cp
+          args:
+            - -R
+            - {{ printf "%s/." .Values.theme.sourcePath | quote }}
+            - /work/
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.theme.resources | nindent 12 }}
+          volumeMounts:
+            - name: theme
+              mountPath: /work
+      {{- end }}
       containers:
         - name: hoocloak
           image: {{ include "hoocloak.image" . | quote }}
@@ -48,6 +67,10 @@ spec:
           env:
             - name: HOOCLOAK_LOGIN_MODE
               value: {{ .Values.loginMode | quote }}
+            {{- if .Values.theme.image.reference }}
+            - name: HOOCLOAK_UI_THEME_DIR
+              value: {{ .Values.theme.mountPath | quote }}
+            {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
@@ -99,10 +122,10 @@ spec:
               mountPath: /etc/hoocloak/config.yaml
               subPath: config.yaml
               readOnly: true
-            {{- if .Values.theme.existingClaim }}
+            {{- if .Values.theme.image.reference }}
             - name: theme
               mountPath: {{ .Values.theme.mountPath }}
-              readOnly: {{ .Values.theme.readOnly }}
+              readOnly: true
             {{- end }}
       volumes:
         - name: config
@@ -111,10 +134,10 @@ spec:
             items:
               - key: {{ ternary .Values.existingConfigSecretKey "config.yaml" (ne .Values.existingConfigSecret "") | quote }}
                 path: config.yaml
-        {{- if .Values.theme.existingClaim }}
+        {{- if .Values.theme.image.reference }}
         - name: theme
-          persistentVolumeClaim:
-            claimName: {{ .Values.theme.existingClaim }}
+          emptyDir:
+            sizeLimit: {{ .Values.theme.emptyDir.sizeLimit }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

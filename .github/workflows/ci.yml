@@ -17,6 +17,7 @@ concurrency:
 env:
   BUN_VERSION: 1.3.14
   HOOVERSION_SHA: 799ecf4a9c29e8ce4d5ad7055a6030adf665cf82 # v0.2.0
+  KIND_VERSION: 0.32.0
 
 jobs:
   commitlint:
@@ -105,6 +106,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          cache: false
+
       - name: Set up Helm
         uses: azure/setup-helm@59b1c81c6280f5abebb1fb1bc585696daa7dfb42 # v5
         with:
@@ -120,8 +127,89 @@ jobs:
             --set existingConfigSecretKey=provider.yaml \
             --set-string existingConfigSecretVersion=1 > /dev/null
           helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set-string 'theme.image.reference=registry.example.test/hoocloak-theme@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > /dev/null
+          helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set image.repository=registry.example.test/custom-hoocloak \
+            --set image.tag=1.0.8 \
+            --set hoocloakConfig.ui.theme_dir=/etc/hoocloak/theme > /dev/null
+          if helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set theme.image.reference=registry.example.test/hoocloak-theme:latest > /dev/null 2>&1; then
+            echo "mutable theme image reference was accepted" >&2
+            exit 1
+          fi
+          if helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set-string 'theme.image.reference=registry.example.test/theme@@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > /dev/null 2>&1; then
+            echo "malformed theme image reference was accepted" >&2
+            exit 1
+          fi
+          if helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set theme.existingClaim=legacy-theme > /dev/null 2>&1; then
+            echo "removed PVC theme value was accepted" >&2
+            exit 1
+          fi
+          helm template hoocloak charts/hoocloak --namespace hoocloak \
             --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > /dev/null
           helm package charts/hoocloak --destination "$RUNNER_TEMP"
+
+      - name: Smoke theme image on Kubernetes
+        run: |
+          set -euo pipefail
+          go install "sigs.k8s.io/kind@v${KIND_VERSION}"
+          docker run --detach --restart=always \
+            --publish 127.0.0.1:5001:5000 \
+            --name kind-registry registry:2
+          cat > "$RUNNER_TEMP/kind.yaml" <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+            - |-
+              [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5001"]
+                endpoint = ["http://kind-registry:5000"]
+          EOF
+          kind create cluster --name hoocloak-theme --config "$RUNNER_TEMP/kind.yaml"
+          docker network connect kind kind-registry
+
+          theme_dir="$RUNNER_TEMP/theme"
+          mkdir -p "$theme_dir/assets"
+          cat > "$theme_dir/Dockerfile" <<'EOF'
+          FROM busybox:1.37.0-uclibc@sha256:39e0df8c4d65953b55c344f017e1ff2e0031a7454b3c24e6b76d402f207e315a
+          COPY --chown=65532:65532 . /theme/
+          USER 65532:65532
+          EOF
+          cat > "$theme_dir/login.html" <<'EOF'
+          <!doctype html><html><head><link rel="stylesheet" href="{{.BasePath}}/assets/theme.css"></head><body>{{if .Error}}<p role="alert">{{.Error}}</p>{{end}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID" value="{{.RequestID}}"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if eq .Mode "select"}}<select name="identity">{{range .Identities}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select>{{else}}<input name="username" value="{{.Username}}"><input name="password" type="password">{{end}}<button>Continue</button></form></body></html>
+          EOF
+          cat > "$theme_dir/logged-out.html" <<'EOF'
+          <!doctype html><html><head><link rel="stylesheet" href="{{.BasePath}}/assets/theme.css"></head><body>Signed out</body></html>
+          EOF
+          echo 'body { color: rebeccapurple; }' > "$theme_dir/assets/theme.css"
+          docker build --provenance=false --tag localhost:5001/hoocloak-theme:ci "$theme_dir"
+          docker push localhost:5001/hoocloak-theme:ci
+          theme_ref="$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5001/hoocloak-theme:ci)"
+          test -n "$theme_ref"
+
+          helm upgrade --install hoocloak charts/hoocloak \
+            --namespace hoocloak --create-namespace \
+            --set-string "theme.image.reference=$theme_ref" \
+            --wait --timeout 2m
+          test "$(kubectl -n hoocloak get pod -l app.kubernetes.io/instance=hoocloak -o jsonpath='{.items[0].status.initContainerStatuses[0].state.terminated.exitCode}')" = "0"
+          kubectl -n hoocloak port-forward service/hoocloak 18080:8080 > "$RUNNER_TEMP/port-forward.log" 2>&1 &
+          port_forward_pid=$!
+          trap 'kill "$port_forward_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/realms/development/assets/theme.css | grep -q rebeccapurple; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/port-forward.log" >&2
+          exit 1
+
+      - name: Remove theme smoke cluster
+        if: always()
+        run: |
+          kind delete cluster --name hoocloak-theme || true
+          docker rm --force kind-registry || true
 
   docker:
     name: Container images

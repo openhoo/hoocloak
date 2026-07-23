@@ -97,11 +97,28 @@
     "theme": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["existingClaim", "mountPath", "readOnly"],
+      "required": ["image", "sourcePath", "mountPath", "emptyDir", "resources"],
       "properties": {
-        "existingClaim": { "type": "string" },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reference", "pullPolicy"],
+          "properties": {
+            "reference": { "type": "string", "pattern": "^$|^[^@[:space:]]+@sha256:[a-fA-F0-9]{64}$", "description": "Immutable OCI image reference; non-empty values must be pinned by SHA-256 digest." },
+            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+          }
+        },
+        "sourcePath": { "type": "string", "const": "/theme" },
         "mountPath": { "type": "string", "const": "/etc/hoocloak/theme" },
-        "readOnly": { "type": "boolean", "const": true }
+        "emptyDir": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sizeLimit"],
+          "properties": {
+            "sizeLimit": { "type": "string", "pattern": "^[1-9][0-9]*(?:Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)$" }
+          }
+        },
+        "resources": { "type": "object" }
       }
     },
     "hoocloakConfig": {
@@ -167,39 +184,6 @@
       },
       "then": {
         "properties": { "existingConfigBaseURL": { "minLength": 1 } }
-      }
-    },
-    {
-      "if": { "properties": { "existingConfigSecret": { "const": "" } }, "required": ["existingConfigSecret"] },
-      "then": {
-        "oneOf": [
-          {
-            "properties": {
-              "theme": {
-                "properties": { "existingClaim": { "const": "" } },
-                "required": ["existingClaim"]
-              },
-              "hoocloakConfig": { "not": { "properties": { "ui": { "required": ["theme_dir"] } }, "required": ["ui"] } }
-            }
-          },
-          {
-            "properties": {
-              "theme": {
-                "properties": { "existingClaim": { "minLength": 1 } },
-                "required": ["existingClaim"]
-              },
-              "hoocloakConfig": {
-                "properties": {
-                  "ui": {
-                    "properties": { "theme_dir": { "const": "/etc/hoocloak/theme" } },
-                    "required": ["theme_dir"]
-                  }
-                },
-                "required": ["ui"]
-              }
-            }
-          }
-        ]
       }
     }
   ],

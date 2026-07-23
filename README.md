@@ -407,9 +407,37 @@ For inline configuration, set `hoocloakConfig.base_url` instead of `existingConf
 - User pod labels may not replace `app.kubernetes.io/name` or `app.kubernetes.io/instance`; pod annotations may not replace chart-owned configuration checksums.
 - `helm test hoocloak` launches a hardened, tokenless pod that checks only Service `/ready` reachability. It is a readiness smoke, not an OIDC login/token test.
 
-### External theme PVC
+### External theme image
 
-Set `theme.existingClaim` to mount an existing PVC read-only at the fixed `/etc/hoocloak/theme`. Inline configuration must set `hoocloakConfig.ui.theme_dir` to that exact path; external configuration must do the same, but the chart cannot inspect it. Themes load only at process startup, so change the PVC contents and then restart/upgrade the pod. Files and directories must be readable/traversable by UID/GID/fsGroup `65532`.
+Themes are immutable deployment artifacts, not persistent state. Publish the complete theme as a small OCI image, then set `theme.image.reference`; the chart copies `/theme` into a Pod-local `emptyDir` before Hoocloak starts and mounts it read-only at `/etc/hoocloak/theme`. No PVC or StorageClass is required. The chart sets `HOOCLOAK_UI_THEME_DIR` automatically, including when the provider configuration comes from an existing Secret.
+
+```dockerfile
+FROM busybox:1.37.0-uclibc@sha256:39e0df8c4d65953b55c344f017e1ff2e0031a7454b3c24e6b76d402f207e315a
+COPY --chown=65532:65532 . /theme/
+USER 65532:65532
+```
+
+```yaml
+theme:
+  image:
+    reference: registry.example.test/hoocloak-theme@sha256:<digest>
+    pullPolicy: IfNotPresent
+```
+
+The theme image must contain `/bin/cp` and `login.html`, `logged-out.html`, plus `assets/` below `/theme`. The chart requires an immutable SHA-256 digest reference for reproducible deployment and rollback inputs. `imagePullSecrets` apply to both application and theme images. Changing the reference recreates the single Hoocloak Pod; because the chart uses `Recreate`, the old Pod is removed before the new image is pulled, copied, and validated, so upgrades and rollbacks are disruptive and can remain unavailable if the new theme fails. Themes load only at process startup. The init container and application share the configured container security context; when theme-image mode is enabled, `podSecurityContext.fsGroup` must equal `securityContext.runAsGroup` so the non-root init container can write the `emptyDir`. Source files must be readable and directories traversable by that identity. `theme.emptyDir.sizeLimit` defaults to `16Mi`.
+
+For the simplest fully immutable deployment, a derived Hoocloak image may instead copy the theme directly to `/etc/hoocloak/theme`; set inline `hoocloakConfig.ui.theme_dir: /etc/hoocloak/theme`, or put the same `ui.theme_dir` value in the complete provider configuration selected by `existingConfigSecret`. The chart's dedicated theme-image mode keeps theme and provider releases independent.
+
+#### Migrating from the PVC theme values
+
+The OCI theme contract replaces the former `theme.existingClaim` and `theme.readOnly` values. Before upgrading an existing PVC-backed release:
+
+1. Build and publish the PVC contents as a digest-pinned theme image using the layout above.
+2. Remove `theme.existingClaim` and `theme.readOnly` from the release values.
+3. Set `theme.image.reference` to the immutable image reference. Remove inline `hoocloakConfig.ui.theme_dir` unless the same values file must also support a derived application image; the chart sets the environment override for OCI themes.
+4. Upgrade with the complete migrated values file. If the release relied only on stored Helm values, use `helm upgrade ... --reset-values -f migrated-values.yaml` so removed PVC keys are not retained.
+
+After the upgrade succeeds, delete the old PVC separately if nothing else uses it. The chart never deletes user-owned claims.
 
 ### Chart maintainer checks
 
@@ -422,6 +450,16 @@ helm template hoocloak charts/hoocloak --namespace hoocloak \
   --set existingConfigSecret=hoocloak-config \
   --set existingConfigSecretKey=provider.yaml \
   --set-string existingConfigSecretVersion=1 > /dev/null
+helm template hoocloak charts/hoocloak --namespace hoocloak \
+  --set-string 'theme.image.reference=registry.example.test/hoocloak-theme@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > /dev/null
+helm template hoocloak charts/hoocloak --namespace hoocloak \
+  --set image.repository=registry.example.test/custom-hoocloak \
+  --set image.tag=1.0.8 \
+  --set hoocloakConfig.ui.theme_dir=/etc/hoocloak/theme > /dev/null
+! helm template hoocloak charts/hoocloak --namespace hoocloak \
+  --set theme.image.reference=registry.example.test/hoocloak-theme:latest > /dev/null
+! helm template hoocloak charts/hoocloak --namespace hoocloak \
+  --set theme.existingClaim=legacy-theme > /dev/null
 helm template hoocloak charts/hoocloak --namespace hoocloak \
   --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > /dev/null
 helm package charts/hoocloak --destination /tmp

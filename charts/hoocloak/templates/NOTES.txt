@@ -15,6 +15,9 @@ Run the Helm readiness test:
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
 
 The test verifies only in-cluster Service readiness. It does not verify discovery, login, or token issuance.
+{{- if .Values.theme.image.reference }}
+Theme image {{ .Values.theme.image.reference }} is copied into Pod-local ephemeral storage at startup; no PVC is used.
+{{- end }}
 
 The configured base_url must be the exact external root URL and must end in /.
 Each realm issuer is base_url followed by realms/<realm-name> (for example, /realms/<realm-name> relative to the external root).

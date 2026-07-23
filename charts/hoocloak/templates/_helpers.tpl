@@ -69,17 +69,14 @@
 {{- if hasKey .Values.podAnnotations "checksum/external-config" -}}
 {{- fail "podAnnotations must not override checksum/external-config" -}}
 {{- end -}}
-{{- if and (not .Values.existingConfigSecret) .Values.theme.existingClaim -}}
-{{- if not .Values.hoocloakConfig.ui -}}
-{{- fail "theme.existingClaim requires hoocloakConfig.ui.theme_dir for inline configuration" -}}
-{{- end -}}
-{{- if ne (default "" .Values.hoocloakConfig.ui.theme_dir) .Values.theme.mountPath -}}
-{{- fail (printf "hoocloakConfig.ui.theme_dir must equal theme.mountPath %s when theme.existingClaim is configured" .Values.theme.mountPath) -}}
+{{- if .Values.theme.image.reference -}}
+{{- if ne (int64 (default 0 .Values.podSecurityContext.fsGroup)) (int64 (default -1 .Values.securityContext.runAsGroup)) -}}
+{{- fail "theme.image.reference requires podSecurityContext.fsGroup to equal securityContext.runAsGroup so the non-root init container can write the theme volume" -}}
 {{- end -}}
 {{- end -}}
-{{- if and (not .Values.existingConfigSecret) (not .Values.theme.existingClaim) .Values.hoocloakConfig.ui -}}
-{{- if .Values.hoocloakConfig.ui.theme_dir -}}
-{{- fail "hoocloakConfig.ui.theme_dir requires theme.existingClaim for inline configuration" -}}
+{{- if and (not .Values.existingConfigSecret) .Values.theme.image.reference .Values.hoocloakConfig.ui -}}
+{{- if and .Values.hoocloakConfig.ui.theme_dir (ne .Values.hoocloakConfig.ui.theme_dir .Values.theme.mountPath) -}}
+{{- fail (printf "hoocloakConfig.ui.theme_dir must equal theme.mountPath %s when theme.image.reference is configured" .Values.theme.mountPath) -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
