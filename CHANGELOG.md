@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 1.0.6 (2026-07-23)
+
+### Bug Fixes
+
+- harden release and login recovery (f11abbe)
+
 ## 1.0.5 (2026-07-23)
 
 ### Bug Fixes
