@@ -1,5 +1,15 @@
 # hoocloak Changelog
 
+## 1.0.1 (2026-07-23)
+
+### Other Changes
+
+- publish images to Docker Hub (3ea3461)
+
+### Bug Fixes
+
+- **release:** activate Docker Hub publishing (9fe9c50)
+
 ## 1.0.0 (2026-07-23)
 
 ### Features
