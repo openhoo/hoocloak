@@ -15,7 +15,7 @@ RUN npm run build && \
         .replaceAll("__API_ORIGIN__", new URL(process.env.VITE_API_BASE_URL).origin); \
       writeFileSync("/tmp/default.conf", config);'
 
-FROM nginxinc/nginx-unprivileged:alpine@sha256:6320020c7da8714feab524e02c08c5a1958675c4e68700e93a2fd8970b065786
+FROM nginxinc/nginx-unprivileged:alpine@sha256:18d67281256ded39ff65e010ae4f831be18f19356f83c60bc546492c7eb6dd23
 COPY --from=build /tmp/default.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 5173

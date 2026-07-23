@@ -10,6 +10,6 @@
     "e2e:ui": "playwright test tests/e2e/hoocloak.spec.ts --ui"
   },
   "devDependencies": {
-    "@playwright/test": "1.61.0"
+    "@playwright/test": "1.61.1"
   }
 }
