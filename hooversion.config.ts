@@ -15,6 +15,6 @@ export default {
     afterVersion: ["bun scripts/sync-chart-version.ts"],
   },
   github: {
-    releases: true,
+    releases: false,
   },
 };

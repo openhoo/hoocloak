@@ -255,6 +255,52 @@ func TestAuthorizeGateValidatesPostedParameters(t *testing.T) {
 	}
 }
 
+func TestAuthorizeGateRejectsDuplicateSecurityParameters(t *testing.T) {
+	server := testServer(t, nil)
+	valid := url.Values{
+		"client_id": {"react-spa"}, "response_type": {"code"}, "scope": {"openid"},
+		"redirect_uri": {"http://app.localhost:5173/auth/callback"}, "code_challenge": {"value"}, "code_challenge_method": {"S256"},
+	}
+	for _, parameter := range []string{"client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method"} {
+		t.Run("GET "+parameter, func(t *testing.T) {
+			query := make(url.Values, len(valid))
+			for key, values := range valid {
+				query[key] = slices.Clone(values)
+			}
+			if parameter == "response_mode" {
+				query[parameter] = []string{"query", "form_post"}
+			} else {
+				query.Add(parameter, "attacker-value")
+			}
+			assertInvalidAuthorizeRequest(t, performRequest(server.Handler, http.MethodGet, "/authorize?"+query.Encode(), "", nil))
+		})
+		t.Run("POST query-body mismatch "+parameter, func(t *testing.T) {
+			body := make(url.Values, len(valid))
+			for key, values := range valid {
+				body[key] = slices.Clone(values)
+			}
+			if parameter == "response_mode" {
+				body.Set(parameter, "query")
+			}
+			assertInvalidAuthorizeRequest(t, performRequest(server.Handler, http.MethodPost, "/authorize?"+url.Values{parameter: {"attacker-value"}}.Encode(), body.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}))
+		})
+	}
+}
+
+func assertInvalidAuthorizeRequest(t *testing.T, response *httptest.ResponseRecorder) {
+	t.Helper()
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", response.Code, response.Body.String())
+	}
+	var oauthResponse map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &oauthResponse); err != nil {
+		t.Fatalf("decode OAuth error: %v; body=%s", err, response.Body.String())
+	}
+	if oauthResponse["error"] != "invalid_request" {
+		t.Fatalf("error = %q, want invalid_request", oauthResponse["error"])
+	}
+}
+
 func TestMutationEndpointsRejectGET(t *testing.T) {
 	server := testServer(t, nil)
 	for _, path := range []string{"/oauth/token", "/oauth/introspect", "/revoke"} {
@@ -409,6 +455,26 @@ func TestCORSUsesExactConfiguredOriginsWithoutCredentials(t *testing.T) {
 	}
 	if !headerContains(preflight.Header().Values("Vary"), "Access-Control-Request-Method") || !headerContains(preflight.Header().Values("Vary"), "Access-Control-Request-Headers") {
 		t.Fatalf("preflight Vary = %q", preflight.Header().Values("Vary"))
+	}
+}
+
+func TestServiceOnlyRealmDeniesAllCORS(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Realms[0].Users = nil
+	cfg.Realms[0].Clients = cfg.Realms[0].Clients[1:]
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("service-only config is invalid: %v", err)
+	}
+	server := testServerWithConfig(t, cfg, nil)
+	for _, method := range []string{http.MethodGet, http.MethodOptions} {
+		headers := map[string]string{"Origin": "https://attacker.example"}
+		if method == http.MethodOptions {
+			headers["Access-Control-Request-Method"] = http.MethodPost
+		}
+		response := performRequest(server.Handler, method, "/.well-known/openid-configuration", "", headers)
+		if origin := response.Header().Get("Access-Control-Allow-Origin"); origin != "" {
+			t.Fatalf("%s Access-Control-Allow-Origin = %q, want empty", method, origin)
+		}
 	}
 }
 
@@ -676,7 +742,7 @@ func TestExternalLoginThemeSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		"login.html":       `<!doctype html><html lang="en"><head><title>Aurora sign in</title><link rel="stylesheet" href="{{.BasePath}}/assets/theme.css"></head><body><main class="aurora"><h1>Welcome through Aurora</h1><p>{{.Client}}</p>{{if .Error}}<p role="alert">Try again</p>{{end}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID" value="{{.RequestID}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><input name="username" value="{{.Username}}"><input name="password" type="password"><button>Continue</button></form><script type="module" src="{{.BasePath}}/assets/theme.js"></script></main></body></html>`,
+		"login.html":       `<!doctype html><html lang="en"><head><title>Aurora sign in</title><link rel="stylesheet" href="{{.BasePath}}/assets/theme.css"></head><body><main class="aurora"><h1>Welcome through Aurora</h1><p>{{.Client}}</p>{{if .Error}}<p role="alert">Try again</p>{{end}}{{if eq .Mode "select"}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID" value="{{.RequestID}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><select name="identity">{{range .Identities}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select><button>Continue</button></form>{{else}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID" value="{{.RequestID}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><input name="username" value="{{.Username}}"><input name="password" type="password"><button>Continue</button></form>{{end}}<script type="module" src="{{.BasePath}}/assets/theme.js"></script></main></body></html>`,
 		"logged-out.html":  `<!doctype html><html lang="en"><head><title>Aurora signed out</title><link rel="stylesheet" href="{{.BasePath}}/assets/theme.css"></head><body><p>Session ended</p></body></html>`,
 		"assets/theme.css": `.aurora { color: rebeccapurple; }`,
 		"assets/theme.js":  `document.documentElement.dataset.themeReady = "true";`,
@@ -911,7 +977,7 @@ func TestExternalLoginThemeRejectsRootRelativeRealmURLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, contents := range map[string]string{
-		"login.html":      `<!doctype html><link rel="stylesheet" href="/assets/theme.css"><form action="/login"></form>`,
+		"login.html":      `<!doctype html><link rel="stylesheet" href="/assets/theme.css"><form method="post" action="/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`,
 		"logged-out.html": `<!doctype html><link rel="stylesheet" href="/assets/theme.css">`,
 	} {
 		if err := os.WriteFile(filepath.Join(themeDir, name), []byte(contents), 0o600); err != nil {
@@ -949,7 +1015,7 @@ func TestExternalLoginThemePreflightsSelectMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, contents := range map[string]string{
-		"login.html":      `<!doctype html><form action="{{.BasePath}}/login">{{if eq .Mode "select"}}{{(index .Identities 0).MissingField}}{{end}}</form>`,
+		"login.html":      `<!doctype html>{{if eq .Mode "select"}}{{(index .Identities 0).MissingField}}{{end}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf">{{if eq .Mode "select"}}<select name="identity"></select>{{else}}<input name="username"><input name="password" type="password">{{end}}</form>`,
 		"logged-out.html": `<!doctype html><title>Signed out</title>`,
 	} {
 		if err := os.WriteFile(filepath.Join(themeDir, name), []byte(contents), 0o600); err != nil {
@@ -960,4 +1026,48 @@ func TestExternalLoginThemePreflightsSelectMode(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "login select mode") {
 		t.Fatalf("loadUI() error = %v, want select-mode execution error", err)
 	}
+}
+
+func TestExternalLoginThemeStructurallyValidatesEveryMode(t *testing.T) {
+	tests := []struct {
+		name, login, want string
+	}{
+		{name: "absolute action", login: `<form method="post" action="https://evil.example/realms/hoocloak-theme-preflight/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, want: "action must be exactly"},
+		{name: "protocol-relative action", login: `<form method="post" action="//evil.example/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, want: "action must be exactly"},
+		{name: "multiple post forms", login: `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form><form method="post" action="{{.BasePath}}/login"></form>`, want: "exactly one POST form"},
+		{name: "separated post forms", login: `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form><form method="get"></form><form method="post" action="{{.BasePath}}/login"></form>`, want: "exactly one POST form"},
+		{name: "non-hidden csrf", login: `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input name="csrf"><input name="username"><input name="password" type="password"></form>`, want: "hidden csrf"},
+		{name: "password controls only", login: `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, want: "select login form must contain identity"},
+		{name: "select controls only", login: `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><select name="identity"></select></form>`, want: "password login form must contain username"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			themeDir := writeExternalTheme(t, tt.login)
+			_, _, err := loadUI(themeDir)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("loadUI() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestExternalLoginThemeAcceptsValidDualModeForms(t *testing.T) {
+	themeDir := writeExternalTheme(t, `{{if eq .Mode "select"}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><select name="identity"><option value="user-id">Example User</option></select></form>{{else}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>{{end}}`)
+	if _, _, err := loadUI(themeDir); err != nil {
+		t.Fatalf("loadUI() error = %v", err)
+	}
+}
+
+func writeExternalTheme(t *testing.T, login string) string {
+	t.Helper()
+	themeDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(themeDir, "assets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{"login.html": login, "logged-out.html": `<!doctype html><title>Signed out</title>`} {
+		if err := os.WriteFile(filepath.Join(themeDir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return themeDir
 }

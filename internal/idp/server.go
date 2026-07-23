@@ -154,10 +154,16 @@ func NewServer(cfg config.Config, keys map[string]SigningKey, logger *slog.Logge
 		realmMux.Handle("/login", issuerInterceptor.Handler(http.HandlerFunc(realmRuntime.login)))
 		realmMux.Handle("/logged-out", issuerInterceptor.Handler(http.HandlerFunc(realmRuntime.loggedOut)))
 		realmMux.Handle("/", realmRuntime.protocolGates(provider))
-		corsPolicy := cors.New(cors.Options{
-			AllowedOrigins: configuredOrigins(realm), AllowedMethods: []string{http.MethodGet, http.MethodHead, http.MethodPost},
+		corsOptions := cors.Options{
+			AllowedMethods: []string{http.MethodGet, http.MethodHead, http.MethodPost},
 			AllowedHeaders: []string{"Accept", "Authorization", "Content-Type"}, AllowCredentials: false, MaxAge: 300,
-		})
+		}
+		if origins := configuredOrigins(realm); len(origins) > 0 {
+			corsOptions.AllowedOrigins = origins
+		} else {
+			corsOptions.AllowOriginFunc = func(string) bool { return false }
+		}
+		corsPolicy := cors.New(corsOptions)
 		realmRuntime.Handler = corsPolicy.Handler(realmMux)
 		server.realms[realm.Name] = realmRuntime
 		probes = append(probes, op.ReadyStorage(store))
@@ -231,22 +237,196 @@ func preflightUITemplates(templates *template.Template) error {
 		name     string
 		template string
 		data     any
-	}{{name: "login", template: "login", data: password}, {name: "login select mode", template: "login", data: selection}, {name: "logged-out", template: "logged-out", data: loggedOutData{BasePath: basePath}}} {
+		mode     string
+	}{{name: "login", template: "login", data: password, mode: config.LoginModePassword}, {name: "login select mode", template: "login", data: selection, mode: config.LoginModeSelect}, {name: "logged-out", template: "logged-out", data: loggedOutData{BasePath: basePath}}} {
 		var rendered bytes.Buffer
 		if err := templates.ExecuteTemplate(&rendered, check.template, check.data); err != nil {
 			return fmt.Errorf("execute %s.html: %w", check.name, err)
 		}
 		output := rendered.String()
-		if check.template == "login" && !strings.Contains(output, basePath+"/login") {
-			return errors.New("execute login.html: login form action must use .BasePath")
-		}
 		for _, rootRelative := range []string{`="/login`, `='/login`, `="/assets/`, `='/assets/`} {
 			if strings.Contains(output, rootRelative) {
 				return fmt.Errorf("execute %s.html: root-relative login and asset URLs are not allowed; use .BasePath", check.name)
 			}
 		}
+		if check.template == "login" {
+			if err := validateLoginHTML(output, basePath, check.mode); err != nil {
+				return fmt.Errorf("execute %s.html: %w", check.name, err)
+			}
+		}
 	}
 	return nil
+}
+
+type loginFormValidation struct {
+	postForms int
+	inPost    bool
+	action    string
+	controls  map[string]string
+}
+
+func validateLoginHTML(document, basePath, mode string) error {
+	validation := loginFormValidation{controls: make(map[string]string)}
+	for offset := 0; ; {
+		name, attributes, closing, next, ok, err := nextHTMLTag(document, offset)
+		if err != nil {
+			return fmt.Errorf("parse rendered HTML: %w", err)
+		}
+		if !ok {
+			break
+		}
+		offset = next
+		if name == "form" {
+			if closing {
+				validation.inPost = false
+				continue
+			}
+			if validation.inPost {
+				return errors.New("nested forms are not allowed")
+			}
+			if strings.EqualFold(attributes["method"], http.MethodPost) {
+				validation.postForms++
+				if validation.postForms > 1 {
+					return errors.New("login page must contain exactly one POST form")
+				}
+				validation.inPost = true
+				validation.action = attributes["action"]
+				validation.controls = make(map[string]string)
+			}
+			continue
+		}
+		if validation.inPost && !closing && (name == "input" || name == "select" || name == "textarea" || name == "button") {
+			if controlName := attributes["name"]; controlName != "" {
+				validation.controls[controlName] = strings.ToLower(attributes["type"])
+			}
+		}
+	}
+	if validation.postForms != 1 {
+		return fmt.Errorf("login page must contain exactly one POST form, found %d", validation.postForms)
+	}
+	if validation.action != basePath+"/login" {
+		return fmt.Errorf("login form action must be exactly %q", basePath+"/login")
+	}
+	for _, hidden := range []string{"authRequestID", "csrf"} {
+		if validation.controls[hidden] != "hidden" {
+			return fmt.Errorf("login form must contain hidden %s control", hidden)
+		}
+	}
+	if mode == config.LoginModePassword {
+		if _, exists := validation.controls["username"]; !exists {
+			return errors.New("password login form must contain username control")
+		}
+		if validation.controls["password"] != "password" {
+			return errors.New("password login form must contain password control")
+		}
+	} else if _, exists := validation.controls["identity"]; !exists {
+		return errors.New("select login form must contain identity control")
+	}
+	return nil
+}
+
+func nextHTMLTag(document string, offset int) (string, map[string]string, bool, int, bool, error) {
+	for {
+		start := strings.IndexByte(document[offset:], '<')
+		if start < 0 {
+			return "", nil, false, len(document), false, nil
+		}
+		start += offset
+		if strings.HasPrefix(document[start:], "<!--") {
+			end := strings.Index(document[start+4:], "-->")
+			if end < 0 {
+				return "", nil, false, 0, false, errors.New("unterminated comment")
+			}
+			offset = start + 4 + end + 3
+			continue
+		}
+		quote := byte(0)
+		end := start + 1
+		for ; end < len(document); end++ {
+			character := document[end]
+			if quote != 0 {
+				if character == quote {
+					quote = 0
+				}
+				continue
+			}
+			if character == '\'' || character == '"' {
+				quote = character
+			} else if character == '>' {
+				break
+			}
+		}
+		if end == len(document) {
+			return "", nil, false, 0, false, errors.New("unterminated tag")
+		}
+		contents := strings.TrimSpace(document[start+1 : end])
+		if contents == "" || contents[0] == '!' || contents[0] == '?' {
+			offset = end + 1
+			continue
+		}
+		closing := contents[0] == '/'
+		if closing {
+			contents = strings.TrimSpace(contents[1:])
+		}
+		nameEnd := strings.IndexAny(contents, " \t\r\n/")
+		if nameEnd < 0 {
+			nameEnd = len(contents)
+		}
+		name := strings.ToLower(contents[:nameEnd])
+		attributes, err := parseHTMLAttributes(contents[nameEnd:])
+		return name, attributes, closing, end + 1, true, err
+	}
+}
+
+func parseHTMLAttributes(contents string) (map[string]string, error) {
+	attributes := make(map[string]string)
+	for offset := 0; offset < len(contents); {
+		for offset < len(contents) && (contents[offset] == ' ' || contents[offset] == '\t' || contents[offset] == '\r' || contents[offset] == '\n' || contents[offset] == '/') {
+			offset++
+		}
+		if offset == len(contents) {
+			break
+		}
+		nameStart := offset
+		for offset < len(contents) && !strings.ContainsRune(" \t\r\n=/", rune(contents[offset])) {
+			offset++
+		}
+		name := strings.ToLower(contents[nameStart:offset])
+		for offset < len(contents) && strings.ContainsRune(" \t\r\n", rune(contents[offset])) {
+			offset++
+		}
+		value := ""
+		if offset < len(contents) && contents[offset] == '=' {
+			offset++
+			for offset < len(contents) && strings.ContainsRune(" \t\r\n", rune(contents[offset])) {
+				offset++
+			}
+			if offset == len(contents) {
+				return nil, fmt.Errorf("attribute %q has no value", name)
+			}
+			if contents[offset] == '\'' || contents[offset] == '"' {
+				quote := contents[offset]
+				offset++
+				valueStart := offset
+				for offset < len(contents) && contents[offset] != quote {
+					offset++
+				}
+				if offset == len(contents) {
+					return nil, fmt.Errorf("attribute %q has an unterminated value", name)
+				}
+				value = contents[valueStart:offset]
+				offset++
+			} else {
+				valueStart := offset
+				for offset < len(contents) && !strings.ContainsRune(" \t\r\n/", rune(contents[offset])) {
+					offset++
+				}
+				value = contents[valueStart:offset]
+			}
+		}
+		attributes[name] = value
+	}
+	return attributes, nil
 }
 
 func keyDerivation(key *rsa.PrivateKey) [32]byte {
@@ -359,6 +539,12 @@ func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
 		return false
+	}
+	for _, parameter := range []string{"client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method"} {
+		if len(r.Form[parameter]) > 1 {
+			oauthError(w, http.StatusBadRequest, "invalid_request", parameter+" must not be repeated", false)
+			return false
+		}
 	}
 	client := s.Store.clients[r.Form.Get("client_id")]
 	if client == nil || client.config.Type != config.ClientTypeSPA {

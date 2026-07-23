@@ -94,6 +94,11 @@ spec:
               mountPath: /etc/hoocloak/config.yaml
               subPath: config.yaml
               readOnly: true
+            {{- if .Values.theme.existingClaim }}
+            - name: theme
+              mountPath: {{ .Values.theme.mountPath }}
+              readOnly: {{ .Values.theme.readOnly }}
+            {{- end }}
       volumes:
         - name: config
           secret:
@@ -101,6 +106,12 @@ spec:
             items:
               - key: {{ ternary .Values.existingConfigSecretKey "config.yaml" (ne .Values.existingConfigSecret "") }}
                 path: config.yaml
+        {{- if .Values.theme.existingClaim }}
+        - name: theme
+          persistentVolumeClaim:
+            claimName: {{ .Values.theme.existingClaim }}
+            readOnly: {{ .Values.theme.readOnly }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -1,4 +1,8 @@
 import { randomBytes } from "node:crypto";
+import { closeSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { createServer } from "node:net";
 import { defineConfig, devices } from "@playwright/test";
 
@@ -12,6 +16,114 @@ function configuredPort(name: string): number | undefined {
     throw new Error(`${name} must be an integer between 1 and 65535`);
   }
   return port;
+}
+
+const allocationLockPath = join(dirname(fileURLToPath(import.meta.url)), ".playwright-e2e.lock");
+const handledSignals = [
+  ["SIGHUP", 129],
+  ["SIGINT", 130],
+  ["SIGQUIT", 131],
+  ["SIGTERM", 143],
+] as const;
+
+function lockOwnerIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function recoverStaleAllocationLock(): boolean {
+  try {
+    const owner = JSON.parse(readFileSync(allocationLockPath, "utf8")) as { pid?: unknown };
+    if (typeof owner.pid === "number" && Number.isInteger(owner.pid) && lockOwnerIsAlive(owner.pid)) {
+      return false;
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return true;
+    }
+
+    // A newly-created lock can briefly be empty while its owner writes metadata.
+    try {
+      if (Date.now() - statSync(allocationLockPath).mtimeMs < 30_000) {
+        return false;
+      }
+    } catch (statError) {
+      if ((statError as NodeJS.ErrnoException).code === "ENOENT") {
+        return true;
+      }
+      throw statError;
+    }
+  }
+
+  try {
+    rmSync(allocationLockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+  return true;
+}
+
+async function acquireAllocationLock(): Promise<() => void> {
+  let announcedWait = false;
+  while (true) {
+    try {
+      const descriptor = openSync(allocationLockPath, "wx", 0o600);
+      try {
+        writeFileSync(descriptor, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
+      } finally {
+        closeSync(descriptor);
+      }
+
+      let released = false;
+      const release = () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        try {
+          rmSync(allocationLockPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw error;
+          }
+        }
+      };
+
+      process.once("exit", release);
+      for (const [signal, exitCode] of handledSignals) {
+        process.once(signal, () => {
+          // Playwright owns graceful webServer shutdown. This is only a bounded fallback
+          // that releases the lock if its signal handling cannot complete.
+          const forcedExit = setTimeout(() => {
+            release();
+            process.exit(exitCode);
+          }, 30_000);
+          forcedExit.unref();
+        });
+      }
+      return release;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+    }
+
+    if (recoverStaleAllocationLock()) {
+      continue;
+    }
+    if (!announcedWait) {
+      console.error(`Waiting for E2E allocation lock at ${allocationLockPath}`);
+      announcedWait = true;
+    }
+    await delay(100);
+  }
 }
 
 async function availablePort(excluded: ReadonlySet<number>): Promise<number> {
@@ -46,6 +158,11 @@ const explicitPorts = Object.values(configuredPorts).filter(
 );
 if (new Set(explicitPorts).size !== explicitPorts.length) {
   throw new Error("E2E_PROVIDER_PORT, E2E_API_PORT, and E2E_SPA_PORT must be distinct");
+}
+
+const usesDynamicPorts = Object.values(configuredPorts).some((port) => port === undefined);
+if (usesDynamicPorts) {
+  await acquireAllocationLock();
 }
 
 const allocatedPorts = new Set(explicitPorts);

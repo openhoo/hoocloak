@@ -209,7 +209,7 @@ test("Bob can access profile but is forbidden from admin", async ({
   await expect(admin).not.toContainText("Admin access granted.");
 });
 
-test("resource server accepts only the development issuer and hoocloak-api audience", async ({
+test("resource server rejects cross-realm tokens and the wrong hoocloak-api audience", async ({
   request,
 }) => {
   const token = await serviceAccessToken(
@@ -248,7 +248,7 @@ test("resource server accepts only the development issuer and hoocloak-api audie
     "partner-secret",
     "partner.read",
   );
-  // The audience is valid for this API, so this rejection specifically defends issuer isolation.
+  // The audience is valid for this API, so this proves cross-realm issuer/signing-key isolation.
   const partnerProfile = await request.get(`${api}/api/profile`, {
     headers: { Authorization: `Bearer ${partnerToken.access_token}` },
   });

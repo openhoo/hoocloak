@@ -22,10 +22,11 @@
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["create", "annotations", "name"],
+      "required": ["create", "annotations", "automount", "name"],
       "properties": {
         "create": { "type": "boolean" },
         "annotations": { "type": "object" },
+        "automount": { "type": "boolean", "const": false, "description": "Compatibility key; the pod template always disables service-account token mounting." },
         "name": { "type": "string" }
       }
     },
@@ -54,6 +55,7 @@
         "hosts": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 1,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -91,6 +93,17 @@
     "existingConfigSecret": { "type": "string" },
     "existingConfigSecretKey": { "type": "string", "minLength": 1 },
     "existingConfigSecretVersion": { "type": "string" },
+    "existingConfigBaseURL": { "type": "string", "pattern": "^$|^https://[^/?#]+/$", "description": "Assertion for the base_url in an external configuration Secret when ingress is enabled." },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingClaim", "mountPath", "readOnly"],
+      "properties": {
+        "existingClaim": { "type": "string" },
+        "mountPath": { "type": "string", "const": "/etc/hoocloak/theme" },
+        "readOnly": { "type": "boolean", "const": true }
+      }
+    },
     "hoocloakConfig": {
       "type": "object",
       "additionalProperties": false,
@@ -102,7 +115,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "theme_dir": { "type": "string", "minLength": 1 }
+            "theme_dir": { "type": "string", "const": "/etc/hoocloak/theme" }
           }
         },
         "tokens": {
@@ -137,7 +150,58 @@
     "serviceAccount", "podAnnotations", "podLabels", "podSecurityContext", "securityContext",
     "service", "ingress", "resources", "livenessProbe", "readinessProbe", "startupProbe",
     "nodeSelector", "tolerations", "affinity", "topologySpreadConstraints", "loginMode",
-    "existingConfigSecret", "existingConfigSecretKey", "existingConfigSecretVersion", "hoocloakConfig"
+    "existingConfigSecret", "existingConfigSecretKey", "existingConfigSecretVersion",
+    "existingConfigBaseURL", "theme", "hoocloakConfig"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "existingConfigSecret": { "minLength": 1 },
+          "ingress": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["existingConfigSecret", "ingress"]
+      },
+      "then": {
+        "properties": { "existingConfigBaseURL": { "minLength": 1 } }
+      }
+    },
+    {
+      "if": { "properties": { "existingConfigSecret": { "const": "" } }, "required": ["existingConfigSecret"] },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "theme": {
+                "properties": { "existingClaim": { "const": "" } },
+                "required": ["existingClaim"]
+              },
+              "hoocloakConfig": { "not": { "properties": { "ui": { "required": ["theme_dir"] } }, "required": ["ui"] } }
+            }
+          },
+          {
+            "properties": {
+              "theme": {
+                "properties": { "existingClaim": { "minLength": 1 } },
+                "required": ["existingClaim"]
+              },
+              "hoocloakConfig": {
+                "properties": {
+                  "ui": {
+                    "properties": { "theme_dir": { "const": "/etc/hoocloak/theme" } },
+                    "required": ["theme_dir"]
+                  }
+                },
+                "required": ["ui"]
+              }
+            }
+          }
+        ]
+      }
+    }
   ],
   "definitions": {
     "probe": {

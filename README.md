@@ -25,6 +25,13 @@ Requirements: Docker with Compose and browser support for reserved `.localhost` 
 docker compose up --build --wait
 ```
 
+The Compose stack defaults to trusted development identity selection. To exercise
+normal username/password authentication instead, start it with:
+
+```bash
+HOOCLOAK_LOGIN_MODE=password docker compose up --build --wait
+```
+
 Open <http://localhost:3000/>. The examples use:
 
 | Principal | Credential | Authorization |
@@ -60,11 +67,15 @@ npx playwright install
 npm run e2e
 ```
 
-Playwright uses dedicated ports (`13000`, `15099`, and `18080`), so the normal
-development stack can remain running. It starts and stops fresh password and
-identity-selection Compose stacks automatically and exercises Chromium,
-Firefox, and WebKit. Reports are written to `playwright-report/`; failure
-artifacts are written to `test-results/`.
+Playwright allocates three available loopback ports for the SPA, API, and
+provider on each invocation, so the normal development stack can remain
+running and parallel suites do not share a Compose project. Set the distinct
+`E2E_SPA_PORT`, `E2E_API_PORT`, and `E2E_PROVIDER_PORT` variables to override
+the allocated ports; set `COMPOSE_PROJECT_NAME` to override the generated
+project name. The suite starts and stops fresh password and identity-selection
+Compose stacks automatically and exercises Chromium, Firefox, and WebKit.
+Reports are written to `playwright-report/`; failure artifacts are written to
+`test-results/`.
 
 Print the binary version with `hoocloak version`. Local builds use the version
 in [`internal/version/version`](internal/version/version); release images stamp
@@ -101,9 +112,11 @@ Secret to restart the pod and reload its immutable subPath mount. Optional
 Ingress, service-account, image digest, scheduling, resource, probe, and
 security-context settings are available in
 [`values.yaml`](charts/hoocloak/values.yaml). When enabling Ingress, terminate
-TLS there and set `hoocloakConfig.base_url` to the exact external HTTPS root URL,
-including its trailing slash. Realm issuers are derived beneath it as
-`{base_url}realms/{realm-name}`.
+TLS there. With inline configuration, set `hoocloakConfig.base_url` to the exact
+external HTTPS root URL, including its trailing slash. With
+`existingConfigSecret`, set `existingConfigBaseURL` to that same URL so the
+chart can assert that it exactly matches the single Ingress host. Realm issuers
+are derived beneath it as `{base_url}realms/{realm-name}`.
 
 ## Configuration
 
@@ -147,16 +160,16 @@ Generate password and client-secret hashes without putting plaintext in YAML:
 printf '%s\n' 'a-local-secret' | hoocloak hash
 ```
 
-Set `HOOCLOAK_LOGIN_MODE=select` in development to replace the password form with a list of configured users. Selecting an identity completes the same authorization flow without checking its password. Omit the variable or set it to `password` to keep normal username/password authentication.
+The standalone binary and Helm chart default to normal username/password
+authentication. Set `HOOCLOAK_LOGIN_MODE=select` for a standalone development
+process, or `loginMode=select` in Helm, to replace the password form with a list
+of configured users. Selecting an identity completes the same authorization
+flow without checking its password. The supplied Compose stack is the inverse:
+it defaults to `select`; start it in password mode with
+`HOOCLOAK_LOGIN_MODE=password docker compose up --build --wait`.
 
-```yaml
-services:
-  hoocloak:
-    environment:
-      HOOCLOAK_LOGIN_MODE: select
-```
-
-The selection mode exposes every configured user on the login page and is intended only for trusted development environments.
+The selection mode exposes every configured user on the login page and is
+intended only for trusted development environments.
 
 Cleartext HTTP is accepted only for loopback, `localhost`, and `.localhost` hosts. Non-local deployments must use HTTPS and preserve exact realm-issuer, redirect URI, post-logout URI, and CORS-origin equality.
 

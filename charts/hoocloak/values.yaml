@@ -14,6 +14,8 @@ fullnameOverride: ""
 serviceAccount:
   create: true
   annotations: {}
+  # Compatibility key. Service-account tokens are always disabled by the pod template.
+  automount: false
   name: ""
 
 podAnnotations: {}
@@ -43,8 +45,9 @@ service:
   port: 8080
   annotations: {}
 
-# Hoocloak is development-only. If enabled, terminate TLS at the ingress and set
-# hoocloakConfig.base_url to the exact external HTTPS root URL, including trailing /.
+# Hoocloak is development-only. If enabled, terminate TLS at the single ingress
+# host. Inline configuration requires hoocloakConfig.base_url to match its exact
+# HTTPS root; an existing Secret instead requires the existingConfigBaseURL assertion.
 ingress:
   enabled: false
   className: ""
@@ -97,6 +100,20 @@ loginMode: password
 existingConfigSecret: ""
 existingConfigSecretKey: config.yaml
 existingConfigSecretVersion: ""
+
+# When existingConfigSecret and ingress are both enabled, set this to the exact
+# canonical external HTTPS root URL for the single ingress host, including trailing /.
+# It asserts the base_url stored in the external Secret without reading Secret content.
+existingConfigBaseURL: ""
+
+# Mount an existing PVC containing an external login theme. The mount path and
+# read-only mode are fixed. With inline configuration, hoocloakConfig.ui.theme_dir
+# must equal theme.mountPath. With existingConfigSecret, its external configuration
+# must set ui.theme_dir to /etc/hoocloak/theme when this claim is configured.
+theme:
+  existingClaim: ""
+  mountPath: /etc/hoocloak/theme
+  readOnly: true
 
 # Ignored when existingConfigSecret is set. Passwords and client secrets must be
 # bcrypt hashes generated with `hoocloak hash`; never put plaintext credentials here.

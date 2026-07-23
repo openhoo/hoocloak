@@ -28,26 +28,31 @@
 {{- end }}
 
 {{- define "hoocloak.validateIngress" -}}
-{{- $baseURL := required "hoocloakConfig.base_url is required when ingress is enabled" .Values.hoocloakConfig.base_url -}}
-{{- range .Values.ingress.hosts -}}
-{{- $host := required "ingress host must not be empty" .host -}}
-{{- if ne $baseURL (printf "https://%s/" $host) -}}
-{{- fail (printf "hoocloakConfig.base_url must be the root HTTPS URL https://%s/ for ingress host %s" $host $host) -}}
+{{- $hostConfig := first .Values.ingress.hosts -}}
+{{- $host := required "ingress host must not be empty" $hostConfig.host -}}
+{{- $expectedBaseURL := printf "https://%s/" $host -}}
+{{- $baseURL := .Values.hoocloakConfig.base_url -}}
+{{- $baseURLName := "hoocloakConfig.base_url" -}}
+{{- if .Values.existingConfigSecret -}}
+{{- $baseURL = required "existingConfigBaseURL is required when existingConfigSecret and ingress are enabled" .Values.existingConfigBaseURL -}}
+{{- $baseURLName = "existingConfigBaseURL" -}}
 {{- end -}}
-{{- range .paths -}}
+{{- if ne $baseURL $expectedBaseURL -}}
+{{- fail (printf "%s must be the canonical root HTTPS URL %s for ingress host %s" $baseURLName $expectedBaseURL $host) -}}
+{{- end -}}
+{{- range $hostConfig.paths -}}
 {{- if or (ne .path "/") (ne .pathType "Prefix") -}}
 {{- fail "ingress routes support only path / with pathType Prefix" -}}
 {{- end -}}
 {{- end -}}
 {{- $covered := false -}}
-{{- range $.Values.ingress.tls -}}
+{{- range .Values.ingress.tls -}}
 {{- if has $host (default (list) .hosts) -}}
 {{- $covered = true -}}
 {{- end -}}
 {{- end -}}
 {{- if not $covered -}}
 {{- fail (printf "ingress TLS must cover host %s" $host) -}}
-{{- end -}}
 {{- end -}}
 {{- end }}
 
@@ -63,6 +68,19 @@
 {{- end -}}
 {{- if hasKey .Values.podAnnotations "checksum/external-config" -}}
 {{- fail "podAnnotations must not override checksum/external-config" -}}
+{{- end -}}
+{{- if and (not .Values.existingConfigSecret) .Values.theme.existingClaim -}}
+{{- if not .Values.hoocloakConfig.ui -}}
+{{- fail "theme.existingClaim requires hoocloakConfig.ui.theme_dir for inline configuration" -}}
+{{- end -}}
+{{- if ne (default "" .Values.hoocloakConfig.ui.theme_dir) .Values.theme.mountPath -}}
+{{- fail (printf "hoocloakConfig.ui.theme_dir must equal theme.mountPath %s when theme.existingClaim is configured" .Values.theme.mountPath) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (not .Values.existingConfigSecret) (not .Values.theme.existingClaim) .Values.hoocloakConfig.ui -}}
+{{- if .Values.hoocloakConfig.ui.theme_dir -}}
+{{- fail "hoocloakConfig.ui.theme_dir requires theme.existingClaim for inline configuration" -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 

@@ -149,7 +149,7 @@ jobs:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           set -euo pipefail
-          args=(release)
+          args=(release --no-github)
           if [ "$DRY_RUN" = "true" ]; then
             args+=(--dry-run)
           fi
@@ -176,7 +176,7 @@ jobs:
     if: needs.release.outputs.current == 'true' && needs.release.outputs.published == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout release tag
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -191,11 +191,13 @@ jobs:
       - name: Package chart
         run: helm package charts/hoocloak --destination dist
 
-      - name: Upload chart to GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.release.outputs.tag }}
-        run: gh release upload "$RELEASE_TAG" dist/*.tgz --clobber
+      - name: Upload packaged chart
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chart-${{ needs.release.outputs.tag }}
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 1
 
   publish-image:
     name: Publish images
@@ -299,3 +301,42 @@ jobs:
           subject-name: ${{ env.GHCR_IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - release
+      - publish-chart
+      - publish-image
+    if: needs.release.outputs.current == 'true' && needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged chart
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: chart-${{ needs.release.outputs.tag }}
+          path: dist
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          charts=(dist/*.tgz)
+          test "${#charts[@]}" -eq 1
+          chart="${charts[0]}"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$chart" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "$chart" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "Hoocloak ${RELEASE_VERSION}" \
+              --generate-notes
+          fi

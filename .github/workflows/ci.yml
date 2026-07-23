@@ -219,6 +219,4 @@ jobs:
 
       - name: Remove CI containers
         if: always()
-        run: |
-          docker compose -f tests/e2e/compose.yaml down --volumes --remove-orphans
-          docker compose down --volumes --remove-orphans
+        run: docker compose down --volumes --remove-orphans

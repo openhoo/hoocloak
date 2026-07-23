@@ -87,6 +87,11 @@ func TestLoadRejectsStrictInvalidConfiguration(t *testing.T) {
 		{"redirect fragment", replace("http://app.localhost:5173/auth/callback", "http://app.localhost:5173/auth/callback#fragment"), "fragments are not allowed"},
 		{"non-local cleartext redirect", replace("http://app.localhost:5173/auth/callback", "http://app.example.test/auth/callback"), "cleartext redirect URI is allowed only"},
 		{"origin path", replace("origins: [http://app.localhost:5173]", "origins: [http://app.localhost:5173/path]"), "must not contain a path, query, or fragment"},
+		{"origin uppercase scheme", replace("origins: [http://app.localhost:5173]", "origins: [HTTP://app.localhost:5173]"), "must use canonical form"},
+		{"origin uppercase host", replace("origins: [http://app.localhost:5173]", "origins: [http://APP.localhost:5173]"), "must use canonical form"},
+		{"origin explicit HTTP default port", replace("origins: [http://app.localhost:5173]", "origins: [http://app.localhost:80]"), "must use canonical form"},
+		{"origin explicit HTTPS default port", replace("origins: [http://app.localhost:5173]", "origins: [https://app.example.test:443]"), "must use canonical form"},
+		{"origin trailing-dot host", replace("origins: [http://app.localhost:5173]", "origins: [http://app.localhost.:5173]"), "must use canonical form"},
 		{"spa secret", replace("        type: spa\n", "        type: spa\n        secret_hash: \"$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme\"\n"), "spa clients must not define secret_hash"},
 		{"spa missing openid", replace("[openid, profile, email, offline_access, api.read]", "[profile, email, offline_access, api.read]"), "spa clients must allow openid"},
 		{"invalid allowed scope token", replace("[openid, profile, email, offline_access, api.read]", "[openid, profile, email, offline_access, api read]"), "invalid OAuth scope token"},
@@ -116,6 +121,22 @@ func TestLoadRejectsStrictInvalidConfiguration(t *testing.T) {
 			_, err := Load(path)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Load() error = %v, want error containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateOriginAcceptsCanonicalForms(t *testing.T) {
+	t.Parallel()
+	for _, origin := range []string{
+		"http://localhost",
+		"http://app.localhost:5173",
+		"https://app.example.test",
+		"https://app.example.test:8443",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			if err := validateOrigin(origin); err != nil {
+				t.Fatalf("validateOrigin(%q) error = %v", origin, err)
 			}
 		})
 	}

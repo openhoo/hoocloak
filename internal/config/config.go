@@ -401,6 +401,26 @@ func validateOrigin(raw string) error {
 	if u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("must not contain a path, query, or fragment")
 	}
+
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(strings.TrimRight(u.Hostname(), "."))
+	authority := host
+	if strings.Contains(host, ":") {
+		authority = "[" + host + "]"
+	}
+	if rawPort := u.Port(); rawPort != "" {
+		port, err := strconv.Atoi(rawPort)
+		if err != nil {
+			return errors.New("port must be numeric")
+		}
+		if !((scheme == "http" && port == 80) || (scheme == "https" && port == 443)) {
+			authority += ":" + strconv.Itoa(port)
+		}
+	}
+	canonical := scheme + "://" + authority
+	if raw != canonical {
+		return fmt.Errorf("must use canonical form %q", canonical)
+	}
 	return validateScheme(u, "origin")
 }
 
