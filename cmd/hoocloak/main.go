@@ -190,6 +190,19 @@ func health(args []string) error {
 }
 
 func applyEnvironmentOverrides(cfg config.Config) (config.Config, error) {
+	if loginMode, configured := os.LookupEnv("HOOCLOAK_LOGIN_MODE"); configured {
+		if loginMode == "" || loginMode != strings.TrimSpace(loginMode) {
+			return config.Config{}, errors.New("HOOCLOAK_LOGIN_MODE must be a nonempty value without surrounding whitespace")
+		}
+		cfg.LoginMode = loginMode
+	}
+	if cfg.LoginMode == "" {
+		cfg.LoginMode = config.LoginModePassword
+	}
+	if cfg.LoginMode != config.LoginModePassword && cfg.LoginMode != config.LoginModeSelect {
+		return config.Config{}, fmt.Errorf("HOOCLOAK_LOGIN_MODE must be %q or %q", config.LoginModePassword, config.LoginModeSelect)
+	}
+
 	themeDir, configured := os.LookupEnv("HOOCLOAK_UI_THEME_DIR")
 	if !configured {
 		return cfg, nil

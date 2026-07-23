@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## Unreleased
+
+### Features
+
+- add environment-selectable development identity login
+
 ## 0.1.2 (2026-07-15)
 
 ### Performance

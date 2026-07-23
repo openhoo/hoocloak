@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -462,9 +463,12 @@ func TestSolidLoginShellAndEmbeddedAssets(t *testing.T) {
 	}
 
 	headers := httptest.NewRecorder()
-	securityHeaders(headers)
-	if got := headers.Header().Get("Content-Security-Policy"); !strings.Contains(got, "script-src 'self'") {
-		t.Fatalf("login CSP does not allow only the embedded script: %q", got)
+	server.securityHeaders(headers)
+	csp := headers.Header().Get("Content-Security-Policy")
+	for _, expected := range []string{"script-src 'self'", "form-action 'self' http://app.localhost:5173"} {
+		if !strings.Contains(csp, expected) {
+			t.Fatalf("login CSP is missing %q: %q", expected, csp)
+		}
 	}
 }
 
@@ -508,6 +512,40 @@ func TestLoginCSRFCookiesAreIsolatedPerAuthorizationRequest(t *testing.T) {
 	server.Handler.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("first parallel login POST = %d, body=%s", response.Code, response.Body.String())
+	}
+}
+func TestIdentitySelectionLogin(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.LoginMode = config.LoginModeSelect
+	server := testServerWithConfig(t, cfg, nil)
+	server.Store.authRequests["request-id"] = &AuthRequest{
+		id: "request-id", clientID: "react-spa", expires: time.Now().Add(5 * time.Minute), scopes: []string{"openid", "api.read"},
+	}
+
+	page := performRequest(server.Handler, http.MethodGet, "/login?authRequestID=request-id", "", nil)
+	if page.Code != http.StatusOK {
+		t.Fatalf("GET login = %d, body=%s", page.Code, page.Body.String())
+	}
+	for _, expected := range []string{`data-mode="select"`, `&#34;ID&#34;:&#34;alice&#34;`, `&#34;Name&#34;:&#34;Alice Admin&#34;`} {
+		if !strings.Contains(page.Body.String(), expected) {
+			t.Errorf("identity selection page is missing %q", expected)
+		}
+	}
+	cookies := page.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("GET login set %d cookies", len(cookies))
+	}
+	form := url.Values{"authRequestID": {"request-id"}, "csrf": {cookies[0].Value}, "identity": {"alice"}}
+	request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(cookies[0])
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("POST identity login = %d, body=%s", response.Code, response.Body.String())
+	}
+	if request := server.Store.authRequests["request-id"]; !request.done || request.subject != "alice" || !slices.Equal(request.amr, []string{"dev-select"}) {
+		t.Fatalf("selected authentication state = %#v", request)
 	}
 }
 

@@ -4,6 +4,8 @@ services:
     build:
       context: .
     command: ["serve", "--config", "/etc/hoocloak/config.yaml"]
+    environment:
+      HOOCLOAK_LOGIN_MODE: ${HOOCLOAK_LOGIN_MODE:-select}
     volumes:
       - ./examples/hoocloak.yaml:/etc/hoocloak/config.yaml:ro
     read_only: true
@@ -68,7 +70,7 @@ services:
       retries: 12
       start_period: 2s
     ports:
-      - "127.0.0.1:5173:5173"
+      - "127.0.0.1:3000:5173"
     depends_on:
       hoocloak:
         condition: service_healthy

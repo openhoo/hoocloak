@@ -13,6 +13,9 @@
     data-client="{{.Client}}"
     data-csrf="{{.CSRF}}"
     data-username="{{.Username}}"
+    data-mode="{{.Mode}}"
+    data-selected-id="{{.SelectedID}}"
+    data-identities='{{.Identities | json}}'
     data-error="{{.Error}}"
   ></div>
   <script type="module" src="/assets/login.js"></script>

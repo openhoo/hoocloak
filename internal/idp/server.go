@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"slices"
@@ -34,7 +35,14 @@ import (
 //go:embed ui/*.html ui/dist/*
 var uiFiles embed.FS
 
-var defaultUITemplates = template.Must(template.New("embedded").Option("missingkey=error").ParseFS(uiFiles, "ui/*.html"))
+var uiTemplateFuncs = template.FuncMap{
+	"json": func(value any) (string, error) {
+		encoded, err := json.Marshal(value)
+		return string(encoded), err
+	},
+}
+
+var defaultUITemplates = template.Must(template.New("embedded").Funcs(uiTemplateFuncs).Option("missingkey=error").ParseFS(uiFiles, "ui/*.html"))
 
 var defaultUIAssets = func() fs.FS {
 	assets, err := fs.Sub(uiFiles, "ui/dist")
@@ -121,7 +129,7 @@ func loadUI(themeDir string) (*template.Template, fs.FS, error) {
 	}
 
 	themeFS := os.DirFS(themeDir)
-	templates := template.New("theme").Option("missingkey=error")
+	templates := template.New("theme").Funcs(uiTemplateFuncs).Option("missingkey=error")
 	for _, file := range []struct {
 		path string
 		name string
@@ -153,7 +161,8 @@ func loadUI(themeDir string) (*template.Template, fs.FS, error) {
 func preflightUITemplates(templates *template.Template) error {
 	login := loginData{
 		RequestID: "request-id", Client: "Example client", CSRF: "csrf-token",
-		Username: "username", Error: "invalid credentials",
+		Mode: config.LoginModePassword, Username: "username", Error: "invalid credentials",
+		Identities: []loginIdentity{{ID: "user-id", Username: "username", Name: "Example User", Email: "user@example.test"}},
 	}
 	for _, check := range []struct {
 		name string
@@ -370,12 +379,34 @@ func (w *responseCapture) Write(data []byte) (int, error) {
 	return w.body.Write(data)
 }
 
-func securityHeaders(w http.ResponseWriter) {
+func (s *Server) securityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	formActions := append([]string{"'self'"}, configuredRedirectOrigins(s.cfg)...)
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; form-action "+strings.Join(formActions, " ")+"; base-uri 'none'; frame-ancestors 'none'")
+}
+
+func configuredRedirectOrigins(cfg config.Config) []string {
+	seen := make(map[string]struct{})
+	for _, client := range cfg.Clients {
+		if client.Type != config.ClientTypeSPA {
+			continue
+		}
+		for _, raw := range client.RedirectURIs {
+			redirect, err := url.Parse(raw)
+			if err == nil {
+				seen[redirect.Scheme+"://"+redirect.Host] = struct{}{}
+			}
+		}
+	}
+	origins := make([]string, 0, len(seen))
+	for origin := range seen {
+		origins = append(origins, origin)
+	}
+	sort.Strings(origins)
+	return origins
 }
 func (s *Server) asset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -414,7 +445,7 @@ func (s *Server) asset(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, name, info.ModTime(), content)
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	securityHeaders(w)
+	s.securityHeaders(w)
 	switch r.Method {
 	case http.MethodGet:
 		s.loginGET(w, r)
@@ -426,7 +457,27 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type loginData struct{ RequestID, Client, CSRF, Username, Error string }
+type loginIdentity struct{ ID, Username, Name, Email string }
+
+type loginData struct {
+	RequestID, Client, CSRF, Mode, Username, SelectedID, Error string
+	Identities                                                 []loginIdentity
+}
+
+func (s *Server) loginPageData(requestID, client, csrf string) loginData {
+	mode := s.cfg.LoginMode
+	if mode == "" {
+		mode = config.LoginModePassword
+	}
+	data := loginData{RequestID: requestID, Client: client, CSRF: csrf, Mode: mode}
+	if mode == config.LoginModeSelect {
+		data.Identities = make([]loginIdentity, 0, len(s.cfg.Users))
+		for _, user := range s.cfg.Users {
+			data.Identities = append(data.Identities, loginIdentity{ID: user.ID, Username: user.Username, Name: user.Name, Email: user.Email})
+		}
+	}
+	return data
+}
 
 func (s *Server) loginGET(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("authRequestID")
@@ -442,7 +493,7 @@ func (s *Server) loginGET(w http.ResponseWriter, r *http.Request) {
 	}
 	// #nosec G124 -- Secure is intentionally false only for validated local HTTP issuers.
 	http.SetCookie(w, &http.Cookie{Name: csrfCookieName(id), Value: csrf, Path: "/login", MaxAge: 600, Expires: time.Now().Add(10 * time.Minute), HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
-	s.renderLogin(w, http.StatusOK, loginData{RequestID: id, Client: client, CSRF: csrf})
+	s.renderLogin(w, http.StatusOK, s.loginPageData(id, client, csrf))
 }
 func (s *Server) loginPOST(w http.ResponseWriter, r *http.Request) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -455,7 +506,7 @@ func (s *Server) loginPOST(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid login request", http.StatusBadRequest)
 		return
 	}
-	id, username := r.PostForm.Get("authRequestID"), r.PostForm.Get("username")
+	id := r.PostForm.Get("authRequestID")
 	client, err := s.Store.LoginInfo(id)
 	if err != nil {
 		http.Error(w, "invalid or expired authorization request", http.StatusBadRequest)
@@ -467,12 +518,23 @@ func (s *Server) loginPOST(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusBadRequest)
 		return
 	}
-	if err := s.Store.Authenticate(id, username, r.PostForm.Get("password")); err != nil {
-		if !errors.Is(err, errInvalidCredentials) {
+	data := s.loginPageData(id, client, submitted)
+	var authenticationError error
+	if data.Mode == config.LoginModeSelect {
+		data.SelectedID = r.PostForm.Get("identity")
+		authenticationError = s.Store.SelectIdentity(id, data.SelectedID)
+		data.Error = "Select a valid identity."
+	} else {
+		data.Username = r.PostForm.Get("username")
+		authenticationError = s.Store.Authenticate(id, data.Username, r.PostForm.Get("password"))
+		data.Error = "Invalid username or password."
+	}
+	if authenticationError != nil {
+		if !errors.Is(authenticationError, errInvalidCredentials) {
 			http.Error(w, "invalid or expired authorization request", http.StatusBadRequest)
 			return
 		}
-		s.renderLogin(w, http.StatusUnauthorized, loginData{RequestID: id, Client: client, CSRF: submitted, Username: username, Error: "Invalid username or password."})
+		s.renderLogin(w, http.StatusUnauthorized, data)
 		return
 	}
 	// #nosec G124 -- Secure is intentionally false only for validated local HTTP issuers.
@@ -490,7 +552,7 @@ func (s *Server) renderLogin(w http.ResponseWriter, status int, data loginData) 
 	_, _ = body.WriteTo(w)
 }
 func (s *Server) loggedOut(w http.ResponseWriter, r *http.Request) {
-	securityHeaders(w)
+	s.securityHeaders(w)
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

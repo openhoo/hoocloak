@@ -166,6 +166,68 @@ form {
   gap: var(--space-4);
 }
 
+.identity-list {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.identity-list legend {
+  margin-bottom: var(--space-2);
+  color: var(--color-navy-800);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.identity-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  border: 1px solid var(--color-mist-300);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  cursor: pointer;
+  transition: border-color var(--motion-fast), background-color var(--motion-fast);
+}
+
+.identity-option:hover {
+  border-color: var(--color-cobalt-700);
+  background: var(--color-mist-100);
+}
+
+.identity-option:has(input:checked) {
+  border-color: var(--color-cobalt-700);
+  background: var(--color-mist-100);
+  box-shadow: 0 0 0 1px var(--color-cobalt-700);
+}
+
+.identity-option input {
+  width: 1rem;
+  min-height: 1rem;
+  margin: 0;
+  padding: 0;
+}
+
+.identity-option span {
+  display: grid;
+  min-width: 0;
+}
+
+.identity-option strong {
+  color: var(--color-navy-950);
+}
+
+.identity-option small {
+  overflow: hidden;
+  color: var(--color-slate-650);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .field {
   display: grid;
   gap: var(--space-2);

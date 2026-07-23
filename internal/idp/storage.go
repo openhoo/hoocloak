@@ -310,8 +310,23 @@ func (s *Store) Authenticate(requestID, username, password string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
-	request, requestOK = s.authRequests[requestID]
-	if !requestOK {
+	return s.completeAuthenticationLocked(requestID, user, now, "pwd")
+}
+func (s *Store) SelectIdentity(requestID, userID string) error {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(now)
+	user, ok := s.users[userID]
+	if !ok {
+		return errInvalidCredentials
+	}
+	return s.completeAuthenticationLocked(requestID, user, now, "dev-select")
+}
+
+func (s *Store) completeAuthenticationLocked(requestID string, user config.User, now time.Time, method string) error {
+	request, ok := s.authRequests[requestID]
+	if !ok {
 		return errors.New("authorization request is missing or expired")
 	}
 	if request.done {
@@ -336,7 +351,7 @@ func (s *Store) Authenticate(requestID, username, password string) error {
 		}
 	}
 	request.mu.Lock()
-	request.subject, request.scopes, request.authTime, request.amr, request.done = user.ID, granted, now, []string{"pwd"}, true
+	request.subject, request.scopes, request.authTime, request.amr, request.done = user.ID, granted, now, []string{method}, true
 	request.mu.Unlock()
 	return nil
 }

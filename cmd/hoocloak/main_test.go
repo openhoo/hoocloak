@@ -36,6 +36,35 @@ func TestApplyEnvironmentOverridesThemeDirectory(t *testing.T) {
 		t.Fatalf("theme directory = %q", got.UI.ThemeDir)
 	}
 }
+func TestApplyEnvironmentOverridesLoginMode(t *testing.T) {
+	t.Setenv("HOOCLOAK_LOGIN_MODE", config.LoginModeSelect)
+
+	got, err := applyEnvironmentOverrides(config.Config{})
+	if err != nil {
+		t.Fatalf("applyEnvironmentOverrides() error = %v", err)
+	}
+	if got.LoginMode != config.LoginModeSelect {
+		t.Fatalf("login mode = %q, want %q", got.LoginMode, config.LoginModeSelect)
+	}
+}
+
+func TestApplyEnvironmentOverridesDefaultsLoginMode(t *testing.T) {
+	got, err := applyEnvironmentOverrides(config.Config{})
+	if err != nil {
+		t.Fatalf("applyEnvironmentOverrides() error = %v", err)
+	}
+	if got.LoginMode != config.LoginModePassword {
+		t.Fatalf("login mode = %q, want %q", got.LoginMode, config.LoginModePassword)
+	}
+}
+
+func TestApplyEnvironmentOverridesRejectsInvalidLoginMode(t *testing.T) {
+	t.Setenv("HOOCLOAK_LOGIN_MODE", "automatic")
+	_, err := applyEnvironmentOverrides(config.Config{})
+	if err == nil || !strings.Contains(err.Error(), "HOOCLOAK_LOGIN_MODE") {
+		t.Fatalf("applyEnvironmentOverrides() error = %v, want environment login-mode error", err)
+	}
+}
 
 func TestHealthChecksStatusWithoutFollowingRedirects(t *testing.T) {
 	tests := []struct {

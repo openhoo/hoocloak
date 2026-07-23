@@ -21,6 +21,8 @@ import (
 const (
 	ClientTypeSPA     = "spa"
 	ClientTypeService = "service"
+	LoginModePassword = "password"
+	LoginModeSelect   = "select"
 )
 
 func CanonicalUsername(value string) string {
@@ -33,12 +35,13 @@ var reservedScopes = map[string]bool{
 }
 
 type Config struct {
-	Issuer  string      `yaml:"issuer"`
-	Listen  string      `yaml:"listen"`
-	UI      UIConfig    `yaml:"ui,omitempty"`
-	Tokens  TokenConfig `yaml:"tokens"`
-	Users   []User      `yaml:"users"`
-	Clients []Client    `yaml:"clients"`
+	Issuer    string      `yaml:"issuer"`
+	Listen    string      `yaml:"listen"`
+	UI        UIConfig    `yaml:"ui,omitempty"`
+	Tokens    TokenConfig `yaml:"tokens"`
+	Users     []User      `yaml:"users"`
+	Clients   []Client    `yaml:"clients"`
+	LoginMode string      `yaml:"-"`
 }
 
 type UIConfig struct {
@@ -144,6 +147,9 @@ func (c Config) Validate() error {
 	}
 	if c.UI.ThemeDir != strings.TrimSpace(c.UI.ThemeDir) {
 		return errors.New("ui.theme_dir must not have surrounding whitespace")
+	}
+	if c.LoginMode != "" && c.LoginMode != LoginModePassword && c.LoginMode != LoginModeSelect {
+		return fmt.Errorf("login mode must be %q or %q", LoginModePassword, LoginModeSelect)
 	}
 
 	ids := make(map[string]string, len(c.Users)+len(c.Clients))

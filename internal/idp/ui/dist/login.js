@@ -366,7 +366,8 @@ function W(e) {
 }
 //#endregion
 //#region node_modules/solid-js/web/dist/web.js
-function re(e, t, n) {
+var re = (e) => y(() => e());
+function ie(e, t, n) {
 	let r = n.length, i = t.length, a = r, o = 0, s = 0, c = t[i - 1].nextSibling, l = null;
 	for (; o < i || s < a;) {
 		if (t[o] === n[s]) {
@@ -400,7 +401,7 @@ function re(e, t, n) {
 		}
 	}
 }
-function ie(e, t, n, r = {}) {
+function ae(e, t, n, r = {}) {
 	let i;
 	return ee((r) => {
 		i = r, t === document ? e() : q(t, e(), t.firstChild ? null : void 0, n);
@@ -467,7 +468,7 @@ function Y(e, t, n, r, i) {
 		}
 		if (o.length === 0) {
 			if (n = Q(e, n, r), s) return n;
-		} else c ? n.length === 0 ? Z(e, o, r) : re(e, n, o) : (n && Q(e), Z(e, o));
+		} else c ? n.length === 0 ? Z(e, o, r) : ie(e, n, o) : (n && Q(e), Z(e, o));
 		n = o;
 	} else if (t.nodeType) {
 		if (a && t.parentNode) return n = s ? [t] : t;
@@ -516,41 +517,71 @@ function Q(e, t, n, r) {
 }
 //#endregion
 //#region src/main.tsx
-var ae = /*#__PURE__*/ G("<div class=alert id=sign-in-error role=alert aria-live=assertive>Sign-in failed. Check your username and password and try again."), oe = /*#__PURE__*/ G("<main class=login-shell><section class=card aria-labelledby=login-title><header class=card-header><div class=identity aria-label=Hoocloak><span class=identity-mark aria-hidden=true>H</span><span class=brand>Hoocloak</span></div><p class=eyebrow>Development identity</p><h1 id=login-title>Sign in</h1><p class=client>Continue to <strong></strong></p></header><form method=post action=/login><input type=hidden name=authRequestID><input type=hidden name=csrf><div class=field><label for=username>Username</label><input id=username name=username autocomplete=username autofocus required></div><div class=field><label for=password>Password</label><input id=password name=password type=password autocomplete=current-password required></div><button type=submit></button></form><p class=notice><span aria-hidden=true>Dev</span>For local development only.");
-function se(e) {
+var oe = /*#__PURE__*/ G("<div class=alert id=sign-in-error role=alert aria-live=assertive>"), se = /*#__PURE__*/ G("<fieldset class=identity-list><legend>Select the user you want to act as"), ce = /*#__PURE__*/ G("<main class=login-shell><section class=card aria-labelledby=login-title><header class=card-header><div class=identity aria-label=Hoocloak><span class=identity-mark aria-hidden=true>H</span><span class=brand>Hoocloak</span></div><p class=eyebrow>Development identity</p><h1 id=login-title></h1><p class=client>Continue to <strong></strong></p></header><form method=post action=/login><input type=hidden name=authRequestID><input type=hidden name=csrf><button type=submit></button></form><p class=notice><span aria-hidden=true>Dev</span>For local development only."), le = /*#__PURE__*/ G("<div class=field><label for=username>Username</label><input id=username name=username autocomplete=username autofocus required>"), ue = /*#__PURE__*/ G("<div class=field><label for=password>Password</label><input id=password name=password type=password autocomplete=current-password required>"), de = /*#__PURE__*/ G("<label class=identity-option><input type=radio name=identity><span><strong></strong><small>@");
+function fe(e) {
+	let t = JSON.parse(e.dataset.identities ?? "[]");
 	return {
 		requestId: e.dataset.requestId ?? "",
 		client: e.dataset.client ?? "",
 		csrf: e.dataset.csrf ?? "",
+		mode: e.dataset.mode === "select" ? "select" : "password",
 		username: e.dataset.username ?? "",
+		selectedId: e.dataset.selectedId ?? "",
+		identities: t,
 		error: e.dataset.error ?? ""
 	};
 }
-function ce(e) {
-	let t = () => e.error.trim().length > 0, [n, r] = _(!1);
+function pe(e) {
+	let t = () => e.error.trim().length > 0;
 	return (() => {
-		var i = oe(), a = i.firstChild, o = a.firstChild, s = o.firstChild.nextSibling.nextSibling.nextSibling.firstChild.nextSibling, c = o.nextSibling, l = c.firstChild, u = l.nextSibling, d = u.nextSibling, f = d.firstChild.nextSibling, p = d.nextSibling, m = p.firstChild.nextSibling, h = p.nextSibling;
-		return q(s, () => e.client), q(a, L(W, {
+		var n = ce(), r = n.firstChild, i = r.firstChild, a = i.firstChild.nextSibling.nextSibling, o = a.nextSibling.firstChild.nextSibling, s = i.nextSibling, c = s.firstChild, l = c.nextSibling, u = l.nextSibling;
+		return q(a, () => e.mode === "select" ? "Choose an identity" : "Sign in"), q(o, () => e.client), q(r, L(W, {
 			get when() {
 				return t();
 			},
 			get children() {
-				return ae();
+				var t = oe();
+				return q(t, () => e.error), t;
 			}
-		}), c), c.addEventListener("submit", () => r(!0)), q(h, () => n() ? "Signing in…" : "Sign in"), v((e) => {
-			var r = n(), i = t() ? "true" : void 0, a = t() ? "sign-in-error" : void 0, o = t() ? "true" : void 0, s = t() ? "sign-in-error" : void 0, l = n();
-			return r !== e.e && K(c, "aria-busy", e.e = r), i !== e.t && K(f, "aria-invalid", e.t = i), a !== e.a && K(f, "aria-describedby", e.a = a), o !== e.o && K(m, "aria-invalid", e.o = o), s !== e.i && K(m, "aria-describedby", e.i = s), l !== e.n && (h.disabled = e.n = l), e;
-		}, {
-			e: void 0,
-			t: void 0,
-			a: void 0,
-			o: void 0,
-			i: void 0,
-			n: void 0
-		}), v(() => l.value = e.requestId), v(() => u.value = e.csrf), v(() => f.value = e.username), i;
+		}), s), q(s, L(W, {
+			get when() {
+				return e.mode === "select";
+			},
+			get fallback() {
+				return [(() => {
+					var n = le(), r = n.firstChild.nextSibling;
+					return v((e) => {
+						var n = t() ? "true" : void 0, i = t() ? "sign-in-error" : void 0;
+						return n !== e.e && K(r, "aria-invalid", e.e = n), i !== e.t && K(r, "aria-describedby", e.t = i), e;
+					}, {
+						e: void 0,
+						t: void 0
+					}), v(() => r.value = e.username), n;
+				})(), (() => {
+					var e = ue(), n = e.firstChild.nextSibling;
+					return v((e) => {
+						var r = t() ? "true" : void 0, i = t() ? "sign-in-error" : void 0;
+						return r !== e.e && K(n, "aria-invalid", e.e = r), i !== e.t && K(n, "aria-describedby", e.t = i), e;
+					}, {
+						e: void 0,
+						t: void 0
+					}), e;
+				})()];
+			},
+			get children() {
+				var n = se();
+				return n.firstChild, q(n, () => e.identities.map((t, n) => (() => {
+					var r = de(), i = r.firstChild, a = i.nextSibling.firstChild, o = a.nextSibling;
+					return o.firstChild, i.required = n === 0, i.autofocus = n === 0, q(a, () => t.Name || t.Username), q(o, () => t.Username, null), q(o, (() => {
+						var e = re(() => !!t.Email);
+						return () => e() ? ` · ${t.Email}` : "";
+					})(), null), v(() => i.value = t.ID), v(() => i.checked = t.ID === e.selectedId), r;
+				})()), null), v(() => K(n, "aria-describedby", t() ? "sign-in-error" : void 0)), n;
+			}
+		}), u), q(u, () => e.mode === "select" ? "Continue as selected user" : "Sign in"), v(() => c.value = e.requestId), v(() => l.value = e.csrf), n;
 	})();
 }
 var $ = document.getElementById("login-root");
 if (!($ instanceof HTMLDivElement)) throw Error("Login root was not found");
-ie(() => L(ce, H(() => se($))), $);
+ae(() => L(pe, H(() => fe($))), $);
 //#endregion

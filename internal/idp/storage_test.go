@@ -139,6 +139,28 @@ func TestAuthenticationIntersectsClientAndUserScopes(t *testing.T) {
 		t.Fatalf("additional ID-token scopes = %v", idScopes)
 	}
 }
+func TestSelectIdentityCompletesAuthorizationWithoutPassword(t *testing.T) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := newTestStore(t, clock)
+	request := &AuthRequest{
+		id: "request-id", clientID: "react-spa", expires: clock.Now().Add(5 * time.Minute),
+		scopes: []string{"openid", "profile", "api.read", "api.write"},
+	}
+	store.authRequests[request.id] = request
+
+	if err := store.SelectIdentity(request.id, "alice"); err != nil {
+		t.Fatalf("SelectIdentity() error = %v", err)
+	}
+	if !request.done || request.subject != "alice" || !slices.Equal(request.amr, []string{"dev-select"}) {
+		t.Fatalf("selection state = done:%v subject:%q amr:%v", request.done, request.subject, request.amr)
+	}
+	if want := []string{"openid", "profile", "api.read"}; !slices.Equal(request.scopes, want) {
+		t.Fatalf("granted scopes = %v, want %v", request.scopes, want)
+	}
+	if err := store.SelectIdentity(request.id, "missing"); err == nil {
+		t.Fatal("SelectIdentity() accepted an unknown identity")
+	}
+}
 
 func TestTokenAudienceSelectionIsRaceSafe(t *testing.T) {
 	request := &AuthRequest{clientID: "react-spa", audience: []string{"hoocloak-api"}}

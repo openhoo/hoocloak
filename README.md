@@ -23,7 +23,7 @@ Requirements: Docker with Compose and browser support for reserved `.localhost` 
 docker compose up --build --wait
 ```
 
-Open <http://app.localhost:5173/>. The examples use:
+Open <http://localhost:3000/>. The examples use:
 
 | Principal | Credential | Authorization |
 |---|---|---|
@@ -55,7 +55,7 @@ in [`internal/version/version`](internal/version/version); release images stamp
 the same released version into the binary. Published images support
 `linux/amd64` and `linux/arm64`; their OCI layers use Zstandard compression.
 
-If your host does not resolve `app.localhost`, `api.localhost`, and `hoocloak.localhost` to loopback, map all three names to `127.0.0.1`. Keep the issuer byte-for-byte identical in the browser, API, and provider.
+If your host does not resolve `api.localhost` and `hoocloak.localhost` to loopback, map both names to `127.0.0.1`. Keep the issuer byte-for-byte identical in the browser, API, and provider.
 
 ## Configuration
 
@@ -80,9 +80,9 @@ users:
 clients:
   - id: react-spa
     type: spa
-    redirect_uris: [http://app.localhost:5173/auth/callback]
-    post_logout_redirect_uris: [http://app.localhost:5173/auth/logout/callback]
-    origins: [http://app.localhost:5173]
+    redirect_uris: [http://localhost:3000/auth/callback]
+    post_logout_redirect_uris: [http://localhost:3000/auth/logout/callback]
+    origins: [http://localhost:3000]
     audiences: [hoocloak-api]
     allowed_scopes: [openid, profile, email, offline_access, api.read]
 ```
@@ -93,11 +93,22 @@ Generate password and client-secret hashes without putting plaintext in YAML:
 printf '%s\n' 'a-local-secret' | hoocloak hash
 ```
 
+Set `HOOCLOAK_LOGIN_MODE=select` in development to replace the password form with a list of configured users. Selecting an identity completes the same authorization flow without checking its password. Omit the variable or set it to `password` to keep normal username/password authentication.
+
+```yaml
+services:
+  hoocloak:
+    environment:
+      HOOCLOAK_LOGIN_MODE: select
+```
+
+The selection mode exposes every configured user on the login page and is intended only for trusted development environments.
+
 Cleartext HTTP is accepted only for loopback, `localhost`, and `.localhost` hosts. Non-local deployments must use HTTPS and preserve exact issuer, redirect URI, post-logout URI, and CORS-origin equality.
 
 ## Provider login UI
 
-The hosted login form is a small SolidJS application in [`ui/login`](ui/login). Hoocloak still owns credential verification, CSRF validation, and the native form POST; the browser bundle only renders the form from server-provided data attributes.
+The hosted login page is a small SolidJS application in [`ui/login`](ui/login). Hoocloak owns CSRF validation, login-mode enforcement, authentication, and the native form POST; the browser bundle only renders server-provided data attributes.
 
 The embedded Hoocloak design remains the default. To override it without changing the binary or checked-in UI, point the configuration at an external theme directory and restart Hoocloak:
 
@@ -118,7 +129,7 @@ themes/aurora/
     └── logo.svg
 ```
 
-`login.html` and `logged-out.html` are Go `html/template` files. Login templates receive `.RequestID`, `.Client`, `.CSRF`, `.Username`, and `.Error`. They must preserve a native `POST /login` form with `authRequestID`, `csrf`, `username`, and `password` fields. Files below `assets/` are served at `/assets/`; external URLs and inline scripts/styles remain blocked by the provider CSP. Invalid, incomplete, or non-executable theme packages fail startup before the listener opens. Theme selection changes presentation only; Hoocloak still owns request lookup, bounded form parsing, CSRF validation, credential verification, redirects, and error handling.
+`login.html` and `logged-out.html` are Go `html/template` files. Login templates receive `.RequestID`, `.Client`, `.CSRF`, `.Mode`, `.Username`, `.SelectedID`, `.Identities`, and `.Error`. They must preserve a native `POST /login` form with `authRequestID` and `csrf`; password mode submits `username` and `password`, while selection mode submits `identity`. Files below `assets/` are served at `/assets/`; external URLs and inline scripts/styles remain blocked by the provider CSP. Invalid, incomplete, or non-executable theme packages fail startup before the listener opens. Hoocloak still owns request lookup, bounded form parsing, CSRF validation, authentication, redirects, and error handling.
 
 For Docker Compose, keep the normal stack untouched and layer the supplied override file over it. The theme is mounted read-only and selected through an absolute container path, so changing themes does not require rebuilding the image:
 
@@ -188,7 +199,7 @@ The runnable .NET 10 API is [`examples/aspnet-api`](examples/aspnet-api). It use
     "Audience": "hoocloak-api"
   },
   "Cors": {
-    "Origin": "http://app.localhost:5173"
+    "Origin": "http://localhost:3000"
   }
 }
 ```
