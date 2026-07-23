@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 1.0.5 (2026-07-23)
+
+### Bug Fixes
+
+- reject ambiguous protocol input (1643118)
+
 ## 1.0.4 (2026-07-23)
 
 ### Bug Fixes
