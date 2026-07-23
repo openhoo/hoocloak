@@ -1,5 +1,20 @@
 # hoocloak Changelog
 
+## 1.0.0 (2026-07-23)
+
+### Features
+
+- **helm:** add hardened deployment chart (4367629)
+
+### Breaking Changes
+
+- add path-based realms (c16dd2c)
+  - BREAKING: replace top-level issuer, users, and clients with base_url and realms. OIDC endpoints now live below /realms/{name}.
+
+### Other Changes
+
+- pin complete setup-helm release (d88141b)
+
 ## 0.2.0 (2026-07-23)
 
 ### Features
