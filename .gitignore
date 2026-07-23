@@ -1,5 +1,8 @@
 /hoocloak
 .hooversion/
+node_modules/
+playwright-report/
+test-results/
 ui/login/node_modules/
 examples/react-spa/node_modules/
 examples/react-spa/dist/

@@ -1,0 +1,84 @@
+services:
+  hoocloak:
+    image: hoocloak:e2e
+    build:
+      context: ../..
+    command: ["serve", "--config", "/etc/hoocloak/config.yaml"]
+    environment:
+      HOOCLOAK_LOGIN_MODE: ${HOOCLOAK_LOGIN_MODE:-password}
+    volumes:
+      - ./hoocloak.yaml:/etc/hoocloak/config.yaml:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/hoocloak", "health", "--url", "http://127.0.0.1:18080/ready", "--timeout", "2s"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+    ports:
+      - "127.0.0.1:18080:18080"
+    networks:
+      default:
+        aliases:
+          - hoocloak.localhost
+
+  api:
+    image: hoocloak-api:e2e
+    build:
+      context: ../../examples/aspnet-api
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_HTTP_PORTS: "15099"
+      Oidc__Authority: http://hoocloak.localhost:18080/realms/development
+      Oidc__Audience: hoocloak-api
+      Cors__Origin: http://localhost:13000
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/15099 && printf 'GET /api/public HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q ' 200 '"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+    ports:
+      - "127.0.0.1:15099:15099"
+    depends_on:
+      hoocloak:
+        condition: service_healthy
+
+  spa:
+    image: hoocloak-spa:e2e
+    build:
+      context: ../../examples/react-spa
+      args:
+        VITE_OIDC_AUTHORITY: http://hoocloak.localhost:18080/realms/development
+        VITE_API_BASE_URL: http://api.localhost:15099
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5173/"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+    ports:
+      - "127.0.0.1:13000:5173"
+    depends_on:
+      hoocloak:
+        condition: service_healthy
+      api:
+        condition: service_healthy

@@ -1,0 +1,15 @@
+{
+  "name": "hoocloak",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "e2e": "npm run e2e:password && npm run e2e:select",
+    "e2e:password": "playwright test tests/e2e/hoocloak.spec.ts",
+    "e2e:select": "HOOCLOAK_LOGIN_MODE=select playwright test tests/e2e/select.spec.ts",
+    "e2e:server": "bash tests/e2e/server.sh",
+    "e2e:ui": "playwright test tests/e2e/hoocloak.spec.ts --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.0"
+  }
+}

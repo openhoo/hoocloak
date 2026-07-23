@@ -1,0 +1,41 @@
+base_url: http://hoocloak.localhost:18080/
+listen: 0.0.0.0:18080
+tokens:
+  access_ttl: 5m
+  id_ttl: 5m
+  refresh_ttl: 8h
+realms:
+  - name: development
+    users:
+      - id: alice
+        username: alice
+        password_hash: "$2b$10$vWq8DjfdBvihgDARWb4jaOyhhRpU6Vgygi49GnwKTTVP45M8nPylW"
+        name: Alice Admin
+        email: alice@example.test
+        email_verified: true
+        roles: [admin]
+        permissions: [api.read]
+      - id: bob
+        username: bob
+        password_hash: "$2b$10$PIeLe0LbNGg1qKwlARH.tO2L8B6Bwte6mp35meQEHoF8mfeIRcmni"
+        name: Bob Reader
+        email: bob@example.test
+        email_verified: true
+        roles: [reader]
+        permissions: [api.read]
+    clients:
+      - id: react-spa
+        type: spa
+        redirect_uris: [http://localhost:13000/auth/callback]
+        post_logout_redirect_uris: [http://localhost:13000/auth/logout/callback]
+        origins: [http://localhost:13000]
+        audiences: [hoocloak-api]
+        allowed_scopes: [openid, profile, email, offline_access, api.read]
+      - id: example-worker
+        type: service
+        secret_hash: "$2b$10$m3D1DJzHGqCD9H5JSHMMmuWnCOxE.wNj0m6evy7v1mD/OrW6B4V5e"
+        name: Example Worker
+        audiences: [hoocloak-api]
+        allowed_scopes: [api.read]
+        roles: [worker]
+        permissions: [api.read]

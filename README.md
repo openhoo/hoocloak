@@ -52,6 +52,20 @@ Stop the stack with:
 docker compose down --remove-orphans
 ```
 
+Run the full browser suite against isolated stacks:
+
+```bash
+npm ci
+npx playwright install
+npm run e2e
+```
+
+Playwright uses dedicated ports (`13000`, `15099`, and `18080`), so the normal
+development stack can remain running. It starts and stops fresh password and
+identity-selection Compose stacks automatically and exercises Chromium,
+Firefox, and WebKit. Reports are written to `playwright-report/`; failure
+artifacts are written to `test-results/`.
+
 Print the binary version with `hoocloak version`. Local builds use the version
 in [`internal/version/version`](internal/version/version); release images stamp
 the same released version into the binary. Published images support
