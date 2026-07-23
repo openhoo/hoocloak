@@ -74,6 +74,7 @@ jobs:
           fi
 
       - name: Verify manual release CI prerequisite
+        id: manual_prerequisite
         if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -91,6 +92,33 @@ jobs:
             echo "::error::Manual publication checkout $checked_out_sha is stale; current main is $current_main_sha. Rerun the release workflow."
             exit 1
           fi
+
+          version="$(tr -d '\r\n' < internal/version/version)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::internal/version/version contains invalid release version '$version'."
+            exit 1
+          fi
+          tag="v${version}"
+          subject="$(git log -1 --format=%s HEAD)"
+          expected_subject="chore(release): hoocloak ${version}"
+          ci_sha="$current_main_sha"
+          resume=false
+
+          if [ "$subject" = "$expected_subject" ]; then
+            if ! git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"; then
+              echo "::error::Existing release retry requires tag $tag, but it is missing from origin."
+              exit 1
+            fi
+            tag_commit="$(git rev-parse "${tag}^{commit}")"
+            if [ "$tag_commit" != "$checked_out_sha" ]; then
+              echo "::error::Existing release retry requires tag $tag to point to current HEAD $checked_out_sha, but it points to $tag_commit."
+              exit 1
+            fi
+            ci_sha="$(git rev-parse HEAD^)"
+            resume=true
+            echo "Recognized existing release $tag at $checked_out_sha; validating CI for first parent $ci_sha."
+          fi
+
           successful_runs="$(
             gh api --method GET \
               -H "Accept: application/vnd.github+json" \
@@ -98,16 +126,25 @@ jobs:
               "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
               -f branch=main \
               -f event=push \
-              -f head_sha="$current_main_sha" \
+              -f head_sha="$ci_sha" \
               -f status=success \
               -f per_page=1 \
               --jq '.total_count'
           )"
           if [ "$successful_runs" -eq 0 ]; then
-            echo "::error::Manual publication requires a successful CI workflow run for current main SHA $current_main_sha. Run CI for this exact commit, or use dry_run for a preview."
+            if [ "$resume" = "true" ]; then
+              echo "::error::Existing release retry requires a successful push CI workflow run for first parent SHA $ci_sha."
+            else
+              echo "::error::Manual publication requires a successful push CI workflow run for current main SHA $ci_sha. Run CI for this exact commit, or use dry_run for a preview."
+            fi
             exit 1
           fi
-          echo "Found a successful CI workflow run for current main SHA $current_main_sha."
+          {
+            echo "resume=$resume"
+            echo "tag=$tag"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "Found a successful push CI workflow run for SHA $ci_sha."
 
       - name: Mark manual release current
         id: manual_current
@@ -115,13 +152,13 @@ jobs:
         run: echo "current=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Bun
-        if: steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true'
+        if: (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') && steps.manual_prerequisite.outputs.resume != 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Install Hooversion
-        if: steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true'
+        if: (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') && steps.manual_prerequisite.outputs.resume != 'true'
         run: |
           set -euo pipefail
           install_dir="$(mktemp -d "$RUNNER_TEMP/hooversion.XXXXXXXX")"
@@ -134,7 +171,7 @@ jobs:
           bun install --frozen-lockfile
 
       - name: Configure release git author
-        if: steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true'
+        if: (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') && steps.manual_prerequisite.outputs.resume != 'true'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -142,7 +179,7 @@ jobs:
 
       - name: Release
         id: release
-        if: steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true'
+        if: (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') && steps.manual_prerequisite.outputs.resume != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -163,6 +200,9 @@ jobs:
           HOOVERSION_PUBLISHED: ${{ steps.release.outputs.published }}
           HOOVERSION_TAG: ${{ steps.release.outputs.tag }}
           HOOVERSION_VERSION: ${{ steps.release.outputs.version }}
+          MANUAL_RESUME: ${{ steps.manual_prerequisite.outputs.resume }}
+          MANUAL_RESUME_TAG: ${{ steps.manual_prerequisite.outputs.tag }}
+          MANUAL_RESUME_VERSION: ${{ steps.manual_prerequisite.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -190,7 +230,11 @@ jobs:
               echo "::error::Hooversion published ${HOOVERSION_TAG:-<no tag>} (${HOOVERSION_VERSION:-<no version>}), but repository metadata resolves to $tag ($version)."
               exit 1
             fi
-          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$subject" = "$expected_subject" ]; then
+          elif [ "$MANUAL_RESUME" = "true" ]; then
+            if [ "$MANUAL_RESUME_VERSION" != "$version" ] || [ "$MANUAL_RESUME_TAG" != "$tag" ] || [ "$subject" != "$expected_subject" ]; then
+              echo "::error::Manual release retry metadata no longer matches current release $tag at $commit."
+              exit 1
+            fi
             echo "Resuming publication for existing release $tag at $commit."
           else
             {

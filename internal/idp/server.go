@@ -259,14 +259,15 @@ func preflightUITemplates(templates *template.Template) error {
 }
 
 type loginFormValidation struct {
-	postForms int
-	inPost    bool
-	action    string
-	controls  map[string]string
+	postForms    int
+	inPost       bool
+	action       string
+	controls     map[string]string
+	controlCount map[string]int
 }
 
 func validateLoginHTML(document, basePath, mode string) error {
-	validation := loginFormValidation{controls: make(map[string]string)}
+	validation := loginFormValidation{controls: make(map[string]string), controlCount: make(map[string]int)}
 	for offset := 0; ; {
 		name, attributes, closing, next, ok, err := nextHTMLTag(document, offset)
 		if err != nil {
@@ -292,11 +293,19 @@ func validateLoginHTML(document, basePath, mode string) error {
 				validation.inPost = true
 				validation.action = attributes["action"]
 				validation.controls = make(map[string]string)
+				validation.controlCount = make(map[string]int)
 			}
 			continue
 		}
 		if validation.inPost && !closing && (name == "input" || name == "select" || name == "textarea" || name == "button") {
 			if controlName := attributes["name"]; controlName != "" {
+				switch controlName {
+				case "authRequestID", "csrf", "identity", "username", "password":
+					validation.controlCount[controlName]++
+					if validation.controlCount[controlName] > 1 {
+						return fmt.Errorf("login form must not contain duplicate %s controls", controlName)
+					}
+				}
 				validation.controls[controlName] = strings.ToLower(attributes["type"])
 			}
 		}

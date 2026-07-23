@@ -235,9 +235,13 @@ tags. Release commits do not recursively trigger another release.
 
 If chart, image, or GitHub Release publication fails after Hooversion has pushed
 the release commit and tag, rerun this workflow manually with `dry_run` disabled.
-The retry requires current `main` to have successful CI, derives the version from
-`internal/version/version`, and resumes only when its `v<version>` tag points to
-that exact release commit; missing or mismatched tags fail without publishing.
+Before running Hooversion, the workflow recognizes a retry only when current
+`main` has the exact subject `chore(release): hoocloak <version>` for the version
+in `internal/version/version` and its forced-fetched `v<version>` tag points to
+that same commit. Because the GitHub-token-authored release commit does not run
+CI, a recognized retry requires successful push CI for its first parent. Any
+ordinary manual publication still requires successful push CI for current
+`main`; missing or mismatched retry tags fail without publishing.
 
 ## License
 

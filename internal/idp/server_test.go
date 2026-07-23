@@ -1111,6 +1111,28 @@ func TestExternalLoginThemeStructurallyValidatesEveryMode(t *testing.T) {
 	}
 }
 
+func TestExternalLoginThemeRejectsDuplicateSensitiveControls(t *testing.T) {
+	tests := []struct {
+		name      string
+		duplicate string
+	}{
+		{name: "auth request ID", duplicate: `<input type="hidden" name="authRequestID">`},
+		{name: "CSRF", duplicate: `<input type="hidden" name="csrf">`},
+		{name: "identity", duplicate: `{{if eq .Mode "select"}}<select name="identity"></select>{{end}}`},
+		{name: "username", duplicate: `{{if eq .Mode "password"}}<input name="username">{{end}}`},
+		{name: "password", duplicate: `{{if eq .Mode "password"}}<input name="password" type="password">{{end}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			login := `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf">{{if eq .Mode "select"}}<select name="identity"></select>{{else}}<input name="username"><input name="password" type="password">{{end}}` + tt.duplicate + `</form>`
+			_, _, err := loadUI(writeExternalTheme(t, login))
+			if err == nil || !strings.Contains(err.Error(), "duplicate") {
+				t.Fatalf("loadUI() error = %v, want duplicate-control error", err)
+			}
+		})
+	}
+}
+
 func TestExternalLoginThemeAcceptsValidDualModeForms(t *testing.T) {
 	themeDir := writeExternalTheme(t, `{{if eq .Mode "select"}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><select name="identity"><option value="user-id">Example User</option></select></form>{{else}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>{{end}}`)
 	if _, _, err := loadUI(themeDir); err != nil {

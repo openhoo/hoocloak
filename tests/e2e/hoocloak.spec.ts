@@ -171,11 +171,30 @@ test("Alice can authenticate, renew, access APIs, then logout revokes provider s
     throw new Error("OIDC access token was not found in session storage");
   });
 
+  const activeToken = await request.get(`${issuer}/userinfo`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  expect(activeToken.ok()).toBeTruthy();
+
+  // oidc-client-ts normally revokes tokens before redirecting to end_session. Stub
+  // those browser requests so only the provider's TerminateSession can invalidate
+  // this still-active access-token family.
+  const clientRevocationAttempts: string[] = [];
+  await page.route(`${issuer}/revoke`, async (route) => {
+    const body = new URLSearchParams(route.request().postData() ?? "");
+    const token = body.get("token");
+    if (token !== null) {
+      clientRevocationAttempts.push(token);
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page).toHaveURL(`${app}/`);
   await expect(
     page.getByRole("heading", { name: "No development identity is active" }),
   ).toBeVisible();
+  expect(clientRevocationAttempts).toContain(accessToken);
 
   const revokedToken = await request.get(`${issuer}/userinfo`, {
     headers: { Authorization: `Bearer ${accessToken}` },

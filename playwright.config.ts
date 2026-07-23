@@ -189,10 +189,12 @@ Object.assign(process.env, e2eEnv);
 export default defineConfig({
   testDir: "./tests/e2e",
   outputDir: "test-results",
-  fullyParallel: true,
+  fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
-  workers: process.env.CI ? 2 : 3,
+  // Every browser exercises the same stateful provider stack. One worker retains
+  // cross-browser coverage without allowing one project to revoke another's state.
+  workers: 1,
   reporter: process.env.CI
     ? [["line"], ["html", { open: "never" }]]
     : [["list"], ["html", { open: "never" }]],
