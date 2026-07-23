@@ -169,9 +169,8 @@ func (c Config) Validate() error {
 
 	realmNames := make(map[string]struct{}, len(c.Realms))
 	for realmIndex, realm := range c.Realms {
-		realmWhere := fmt.Sprintf("realms[%d]", realmIndex)
 		if !realmNamePattern.MatchString(realm.Name) {
-			return fmt.Errorf("%s.name must match %s", realmWhere, realmNamePattern.String())
+			return fmt.Errorf("realms[%d].name must match %s", realmIndex, realmNamePattern.String())
 		}
 		if _, exists := realmNames[realm.Name]; exists {
 			return fmt.Errorf("duplicate realm name %q", realm.Name)
@@ -181,7 +180,7 @@ func (c Config) Validate() error {
 		ids := make(map[string]string, len(realm.Users)+len(realm.Clients))
 		usernames := make(map[string]struct{}, len(realm.Users))
 		for userIndex, user := range realm.Users {
-			where := fmt.Sprintf("%s.users[%d]", realmWhere, userIndex)
+			where := fmt.Sprintf("realms[%d].users[%d]", realmIndex, userIndex)
 			if err := requireID(user.ID, where, ids); err != nil {
 				return err
 			}
@@ -193,7 +192,7 @@ func (c Config) Validate() error {
 				return fmt.Errorf("%s.username must not have surrounding whitespace", where)
 			}
 			if _, exists := usernames[username]; exists {
-				return fmt.Errorf("%s has duplicate username %q", realmWhere, user.Username)
+				return fmt.Errorf("realms[%d] has duplicate username %q", realmIndex, user.Username)
 			}
 			usernames[username] = struct{}{}
 			if err := validBcrypt(user.PasswordHash); err != nil {
@@ -208,7 +207,7 @@ func (c Config) Validate() error {
 		}
 
 		for clientIndex, client := range realm.Clients {
-			where := fmt.Sprintf("%s.clients[%d]", realmWhere, clientIndex)
+			where := fmt.Sprintf("realms[%d].clients[%d]", realmIndex, clientIndex)
 			if err := requireID(client.ID, where, ids); err != nil {
 				return err
 			}

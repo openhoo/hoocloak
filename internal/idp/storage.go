@@ -414,7 +414,8 @@ func (s *Store) createAccessToken(request op.TokenRequest, familyID string) (str
 		return "", time.Time{}, err
 	}
 	audience := slices.Clone(s.clients[clientID].config.Audiences)
-	record := accessRecord{id: id, clientID: clientID, subject: request.GetSubject(), audience: audience, scopes: slices.Clone(request.GetScopes()), expires: expires, issuedAt: now, authTime: authTime, amr: slices.Clone(amr), familyID: familyID}
+	scopes := request.GetScopes()
+	record := accessRecord{id: id, clientID: clientID, subject: request.GetSubject(), audience: audience, scopes: scopes, expires: expires, issuedAt: now, authTime: authTime, amr: amr, familyID: familyID}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
@@ -477,10 +478,12 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 		delete(s.access, consumeRefreshRecord(old))
 	}
 	audience := slices.Clone(s.clients[clientID].config.Audiences)
-	record := &refreshRecord{familyID: family.id, clientID: clientID, subject: request.GetSubject(), audience: audience, scopes: slices.Clone(request.GetScopes()), amr: slices.Clone(amr), authTime: authTime, accessID: accessID}
+	scopes := request.GetScopes()
+	subject := request.GetSubject()
+	record := &refreshRecord{familyID: family.id, clientID: clientID, subject: subject, audience: audience, scopes: scopes, amr: amr, authTime: authTime, accessID: accessID}
 	family.tokens = append(family.tokens, newHash)
 	s.refresh[newHash] = record
-	s.access[accessID] = accessRecord{id: accessID, clientID: clientID, subject: request.GetSubject(), audience: slices.Clone(audience), scopes: slices.Clone(request.GetScopes()), expires: expires, issuedAt: now, authTime: authTime, amr: slices.Clone(amr), familyID: family.id}
+	s.access[accessID] = accessRecord{id: accessID, clientID: clientID, subject: subject, audience: slices.Clone(audience), scopes: slices.Clone(scopes), expires: expires, issuedAt: now, authTime: authTime, amr: slices.Clone(amr), familyID: family.id}
 	s.scheduleExpiryLocked(expires)
 	return accessID, newToken, expires, nil
 }

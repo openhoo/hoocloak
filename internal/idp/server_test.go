@@ -115,13 +115,38 @@ func realmPathAdapter(application http.Handler, basePath string) http.Handler {
 	})
 }
 
-func BenchmarkDiscovery(b *testing.B) {
+func BenchmarkHTTPHandlers(b *testing.B) {
 	server := testServer(b, nil)
-	request := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		server.Handler.ServeHTTP(httptest.NewRecorder(), request)
+	benchmarks := []struct {
+		name   string
+		method string
+		target string
+		body   string
+		header map[string]string
+	}{
+		{name: "Discovery", method: http.MethodGet, target: "/.well-known/openid-configuration"},
+		{name: "DiscoveryHead", method: http.MethodHead, target: "/.well-known/openid-configuration"},
+		{
+			name: "AuthorizeGate", method: http.MethodGet,
+			target: "/authorize?client_id=react-spa&response_type=code&scope=openid+profile+api.read&redirect_uri=" + url.QueryEscape("http://app.localhost:5173/auth/callback") + "&code_challenge=benchmark-challenge&code_challenge_method=S256",
+		},
+		{
+			name: "ClientCredentialsGate", method: http.MethodPost, target: "/oauth/token",
+			body:   "grant_type=client_credentials&scope=api.read",
+			header: map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("worker:worker-secret")), "Content-Type": "application/x-www-form-urlencoded"},
+		},
+	}
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				request := httptest.NewRequest(benchmark.method, benchmark.target, strings.NewReader(benchmark.body))
+				for key, value := range benchmark.header {
+					request.Header.Set(key, value)
+				}
+				server.Handler.ServeHTTP(httptest.NewRecorder(), request)
+			}
+		})
 	}
 }
 

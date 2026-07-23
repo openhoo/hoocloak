@@ -24,7 +24,7 @@ func (c *fakeClock) Advance(duration time.Duration) {
 	c.current = c.current.Add(duration)
 }
 
-func newTestStore(t *testing.T, clock Clock) *Store {
+func newTestStore(t testing.TB, clock Clock) *Store {
 	t.Helper()
 	cfg := testConfig(t)
 	return NewStore(cfg.Realms[0], cfg.Tokens, "/realms/development", nil, "test-kid", clock)
@@ -64,6 +64,105 @@ func BenchmarkRevokeFamilyWithManyFamilies(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		store.revokeFamilyLocked("family-5000")
+	}
+}
+
+func BenchmarkSelectIdentity(b *testing.B) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := newTestStore(b, clock)
+	request := &AuthRequest{
+		id: "request-id", clientID: "react-spa", expires: clock.Now().Add(5 * time.Minute),
+		scopes: []string{"openid", "profile", "email", "offline_access", "api.read", "api.write"},
+	}
+	store.authRequests[request.id] = request
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		request.done = false
+		if err := store.SelectIdentity(request.id, "alice"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkCreateAccessToken(b *testing.B) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := newTestStore(b, clock)
+	request := &serviceRequest{
+		clientID: "worker", subject: "worker", audience: []string{"hoocloak-api"}, scopes: []string{"api.read"},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		accessID, _, err := store.CreateAccessToken(context.Background(), request)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		delete(store.access, accessID)
+		b.StartTimer()
+	}
+}
+
+func BenchmarkRefreshTokenLifecycle(b *testing.B) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := newTestStore(b, clock)
+	requestTemplate := &RefreshRequest{
+		clientID: "react-spa", subject: "alice", audience: []string{"hoocloak-api"},
+		scopes: []string{"openid", "offline_access", "api.read"}, authTime: clock.Now(), amr: []string{"pwd"},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		accessID, refreshToken, _, err := store.CreateAccessAndRefreshTokens(context.Background(), requestTemplate, "")
+		if err != nil {
+			b.Fatal(err)
+		}
+		request, err := store.TokenRequestByRefreshToken(context.Background(), refreshToken)
+		if err != nil {
+			b.Fatal(err)
+		}
+		rotatedAccessID, rotatedToken, _, err := store.CreateAccessAndRefreshTokens(context.Background(), request, refreshToken)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		b.StopTimer()
+		familyID := store.refresh[sha256.Sum256([]byte(rotatedToken))].familyID
+		delete(store.access, accessID)
+		delete(store.access, rotatedAccessID)
+		for _, hash := range store.families[familyID].tokens {
+			delete(store.refresh, hash)
+		}
+		delete(store.families, familyID)
+		store.nextExpiry = time.Time{}
+		b.StartTimer()
+	}
+}
+
+func BenchmarkPruneExpiredState(b *testing.B) {
+	for _, recordCount := range []int{100, 1_000} {
+		b.Run(fmt.Sprintf("Records%d", recordCount), func(b *testing.B) {
+			clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+			cfg := testConfig(b)
+			b.ReportAllocs()
+			for b.Loop() {
+				b.StopTimer()
+				store := NewStore(cfg.Realms[0], cfg.Tokens, "/realms/development", nil, "test-kid", clock)
+				for index := range recordCount {
+					id := fmt.Sprintf("record-%d", index)
+					expires := clock.Now().Add(-time.Minute)
+					store.authRequests[id] = &AuthRequest{id: id, expires: expires}
+					store.codes[id] = codeRecord{requestID: id, expires: expires}
+					store.access[id] = accessRecord{id: id, expires: expires}
+				}
+				store.nextExpiry = clock.Now().Add(-time.Minute)
+				b.StartTimer()
+				store.mu.Lock()
+				store.pruneLocked(clock.Now())
+				store.mu.Unlock()
+			}
+		})
 	}
 }
 
