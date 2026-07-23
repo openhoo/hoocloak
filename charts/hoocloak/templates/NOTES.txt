@@ -1,0 +1,15 @@
+Hoocloak is available inside the cluster at:
+  http://{{ include "hoocloak.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/
+
+{{- if .Values.ingress.enabled }}
+Configured ingress hosts:
+{{- range .Values.ingress.hosts }}
+  {{ if $.Values.ingress.tls }}https{{ else }}http{{ end }}://{{ .host }}/
+{{- end }}
+{{- else }}
+For local access:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hoocloak.fullname" . }} 8080:{{ .Values.service.port }}
+{{- end }}
+
+The configured issuer must exactly match the URL used by clients and must end in /.
+Hoocloak is development-only and deliberately restricted to one replica because signing keys and sessions are in memory.

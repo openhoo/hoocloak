@@ -1,0 +1,128 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/openhoo/hoocloak
+  pullPolicy: IfNotPresent
+  tag: ""
+  # When set, digest takes precedence over tag. Example: sha256:abc123...
+  digest: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  privileged: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# Hoocloak is development-only. If enabled, terminate TLS at the ingress and set
+# hoocloakConfig.issuer to the exact external HTTPS root URL, including trailing /.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: hoocloak.localhost
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 2
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 1
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  enabled: true
+  periodSeconds: 2
+  timeoutSeconds: 2
+  failureThreshold: 15
+  initialDelaySeconds: 0
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+loginMode: password
+
+# Use an existing Secret for the complete configuration. It must contain the key
+# selected by existingConfigSecretKey. Increment existingConfigSecretVersion
+# after changing that Secret to restart the pod and reload its subPath mount.
+existingConfigSecret: ""
+existingConfigSecretKey: config.yaml
+existingConfigSecretVersion: ""
+
+# Ignored when existingConfigSecret is set. Passwords and client secrets must be
+# bcrypt hashes generated with `hoocloak hash`; never put plaintext credentials here.
+hoocloakConfig:
+  issuer: http://hoocloak.localhost:8080/
+  listen: 0.0.0.0:8080
+  tokens:
+    access_ttl: 5m
+    id_ttl: 5m
+    refresh_ttl: 8h
+  users: []
+  clients:
+    - id: react-spa
+      type: spa
+      redirect_uris:
+        - http://localhost:3000/auth/callback
+      post_logout_redirect_uris:
+        - http://localhost:3000/auth/logout/callback
+      origins:
+        - http://localhost:3000
+      audiences:
+        - hoocloak-api
+      allowed_scopes:
+        - openid
+        - profile
+        - email
+        - offline_access
+        - api.read

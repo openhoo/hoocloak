@@ -15,6 +15,7 @@
 ### Features
 
 - add environment-selectable development identity login
+- add a hardened single-replica Helm chart
 
 ## 0.1.2 (2026-07-15)
 

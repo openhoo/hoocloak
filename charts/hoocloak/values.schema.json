@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Hoocloak Helm values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "replicaCount": { "type": "integer", "const": 1, "description": "Hoocloak stores signing keys and sessions in memory and therefore supports exactly one replica." },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "pullPolicy", "tag", "digest"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "tag": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^$|^sha256:[a-fA-F0-9]{64}$" }
+      }
+    },
+    "imagePullSecrets": { "type": "array", "items": { "type": "object" } },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "automount", "annotations", "name"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "automount": { "type": "boolean" },
+        "annotations": { "type": "object" },
+        "name": { "type": "string" }
+      }
+    },
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+    "podSecurityContext": { "type": "object" },
+    "securityContext": { "type": "object" },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "port", "annotations"],
+      "properties": {
+        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "annotations": { "type": "object" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "className", "annotations", "hosts", "tls"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["host", "paths"],
+            "properties": {
+              "host": { "type": "string", "minLength": 1 },
+              "paths": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path", "pathType"],
+                  "properties": {
+                    "path": { "type": "string", "pattern": "^/" },
+                    "pathType": { "type": "string", "enum": ["Exact", "Prefix", "ImplementationSpecific"] }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tls": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "resources": { "type": "object" },
+    "livenessProbe": { "$ref": "#/definitions/probe" },
+    "readinessProbe": { "$ref": "#/definitions/probe" },
+    "startupProbe": { "$ref": "#/definitions/probe" },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array", "items": { "type": "object" } },
+    "affinity": { "type": "object" },
+    "topologySpreadConstraints": { "type": "array", "items": { "type": "object" } },
+    "loginMode": { "type": "string", "enum": ["password", "select"] },
+    "existingConfigSecret": { "type": "string" },
+    "existingConfigSecretKey": { "type": "string", "minLength": 1 },
+    "existingConfigSecretVersion": { "type": "string" },
+    "hoocloakConfig": {
+      "type": "object",
+      "required": ["issuer", "listen", "tokens", "users", "clients"],
+      "properties": {
+        "issuer": { "type": "string", "pattern": "^https?://.+/$" },
+        "listen": { "type": "string", "const": "0.0.0.0:8080" },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["access_ttl", "id_ttl", "refresh_ttl"],
+          "properties": {
+            "access_ttl": { "type": "string", "minLength": 1 },
+            "id_ttl": { "type": "string", "minLength": 1 },
+            "refresh_ttl": { "type": "string", "minLength": 1 }
+          }
+        },
+        "users": { "type": "array" },
+        "clients": { "type": "array" }
+      }
+    }
+  },
+  "required": [
+    "replicaCount", "image", "imagePullSecrets", "nameOverride", "fullnameOverride",
+    "serviceAccount", "podAnnotations", "podLabels", "podSecurityContext", "securityContext",
+    "service", "ingress", "resources", "livenessProbe", "readinessProbe", "startupProbe",
+    "nodeSelector", "tolerations", "affinity", "topologySpreadConstraints", "loginMode",
+    "existingConfigSecret", "existingConfigSecretKey", "existingConfigSecretVersion", "hoocloakConfig"
+  ],
+  "definitions": {
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "periodSeconds", "timeoutSeconds", "failureThreshold"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "initialDelaySeconds": { "type": "integer", "minimum": 0 },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

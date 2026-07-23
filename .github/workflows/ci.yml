@@ -93,6 +93,32 @@ jobs:
       - name: Scan Go security patterns
         run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -quiet -tags no_otel ./...
 
+  helm:
+    name: Helm chart
+    needs: commitlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Helm
+        uses: azure/setup-helm@69214f9d74fea2fd41b0d5ca2f5222dd5ba34fd4 # v5
+        with:
+          version: v4.2.2
+
+      - name: Validate chart
+        run: |
+          set -euo pipefail
+          helm lint charts/hoocloak --strict
+          helm template hoocloak charts/hoocloak --namespace hoocloak > /dev/null
+          helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set existingConfigSecret=hoocloak-config \
+            --set existingConfigSecretKey=provider.yaml \
+            --set-string existingConfigSecretVersion=1 > /dev/null
+          helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > /dev/null
+          helm package charts/hoocloak --destination "$RUNNER_TEMP"
+
   docker:
     name: Docker Compose build
     needs:

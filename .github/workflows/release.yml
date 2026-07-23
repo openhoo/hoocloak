@@ -133,6 +133,33 @@ jobs:
         if: always()
         run: test -z "${HOOVERSION_DIR:-}" || rm -rf "$HOOVERSION_DIR"
 
+  publish-chart:
+    name: Publish Helm chart
+    needs: release
+    if: needs.release.outputs.current == 'true' && needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@69214f9d74fea2fd41b0d5ca2f5222dd5ba34fd4 # v5
+        with:
+          version: v4.2.2
+
+      - name: Package chart
+        run: helm package charts/hoocloak --destination dist
+
+      - name: Upload chart to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+        run: gh release upload "$RELEASE_TAG" dist/*.tgz --clobber
+
   publish-image:
     name: Publish image to GHCR
     needs: release

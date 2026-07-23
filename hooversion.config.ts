@@ -12,7 +12,7 @@ export default {
     },
   ],
   hooks: {
-    afterVersion: [],
+    afterVersion: ["bun scripts/sync-chart-version.ts"],
   },
   github: {
     releases: true,

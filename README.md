@@ -57,6 +57,37 @@ the same released version into the binary. Published images support
 
 If your host does not resolve `api.localhost` and `hoocloak.localhost` to loopback, map both names to `127.0.0.1`. Keep the issuer byte-for-byte identical in the browser, API, and provider.
 
+## Helm
+
+The chart in [`charts/hoocloak`](charts/hoocloak) deploys the provider as a
+single hardened pod. Hoocloak deliberately supports exactly one replica because
+signing keys, authorization state, refresh-token families, and revocations are
+kept in memory.
+
+Create a Secret containing a complete Hoocloak configuration, then install the
+chart with that Secret. This keeps bcrypt password and client-secret hashes out
+of the Helm release:
+
+```bash
+kubectl create namespace hoocloak
+kubectl -n hoocloak create secret generic hoocloak-config \
+  --from-file=config.yaml=examples/hoocloak.yaml
+helm install hoocloak ./charts/hoocloak \
+  --namespace hoocloak \
+  --set existingConfigSecret=hoocloak-config
+kubectl -n hoocloak port-forward svc/hoocloak 8080:8080
+```
+
+The inline default configuration contains no users. Configure users explicitly
+for isolated local clusters, or prefer `existingConfigSecret` for shared
+clusters. Increment `existingConfigSecretVersion` after updating an external
+Secret to restart the pod and reload its immutable subPath mount. Optional
+Ingress, service-account, image digest, scheduling, resource, probe, and
+security-context settings are available in
+[`values.yaml`](charts/hoocloak/values.yaml). When enabling Ingress, terminate
+TLS there and set `hoocloakConfig.issuer` to the exact external HTTPS root URL,
+including its trailing slash.
+
 ## Configuration
 
 `hoocloak serve --config ./hoocloak.yaml` loads immutable YAML before opening a socket. Unknown fields and unsafe client settings are rejected. See [`examples/hoocloak.yaml`](examples/hoocloak.yaml) for the complete runnable configuration.
