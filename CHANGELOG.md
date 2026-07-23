@@ -1,5 +1,15 @@
 # hoocloak Changelog
 
+## 1.0.3 (2026-07-23)
+
+### Other Changes
+
+- **e2e:** add cross-browser integration suite (11edbf1)
+
+### Bug Fixes
+
+- harden protocol and deployment edges (3423018)
+
 ## Unreleased
 
 ## 1.0.2 (2026-07-23)
