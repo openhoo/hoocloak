@@ -97,17 +97,9 @@ main,
 }
 
 .identity-mark {
-  display: grid;
   width: var(--space-6);
   height: var(--space-6);
-  place-items: center;
-  border-radius: var(--radius-sm);
-  background: var(--color-cobalt-700);
-  color: var(--color-white);
-  font-family: var(--font-display);
-  font-size: 0.75rem;
-  font-weight: 800;
-  line-height: 1;
+  object-fit: contain;
 }
 
 .brand {
@@ -346,4 +338,3 @@ button:disabled {
     transform: none;
   }
 }
-

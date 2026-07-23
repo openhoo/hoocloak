@@ -24,6 +24,7 @@ FROM scratch
 USER 65532:65532
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/hoocloak /hoocloak
+COPY assets/branding/hoocloak-logo.png /usr/share/hoocloak/hoocloak-logo.png
 EXPOSE 8080
 ENTRYPOINT ["/hoocloak"]
 CMD ["serve", "--config", "/etc/hoocloak/config.yaml"]

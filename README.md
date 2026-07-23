@@ -1,3 +1,5 @@
+![Hoocloak — OpenID Connect for local development](assets/branding/hoocloak-banner.png)
+
 # Hoocloak
 
 Hoocloak is a deliberately small OpenID Connect provider for local development. It gives browser SPAs an Authorization Code + PKCE login and gives service accounts an OAuth 2.0 client-credentials flow. APIs validate short-lived RS256 JWTs through standard discovery and JWKS.

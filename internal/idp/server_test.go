@@ -464,6 +464,7 @@ func TestSolidLoginShellAndEmbeddedAssets(t *testing.T) {
 	}{
 		{"/assets/login.js", "text/javascript; charset=utf-8"},
 		{"/assets/login.css", "text/css; charset=utf-8"},
+		{"/assets/hoocloak-logo.png", "image/png"},
 	} {
 		assetResponse := performRequest(server.Handler, http.MethodGet, asset.path, "", nil)
 		if assetResponse.Code != http.StatusOK || assetResponse.Body.Len() == 0 {

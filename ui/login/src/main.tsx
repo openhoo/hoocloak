@@ -48,7 +48,12 @@ function LoginCard(props: LoginData) {
       <section class="card" aria-labelledby="login-title">
         <header class="card-header">
           <div class="identity" aria-label="Hoocloak">
-            <span class="identity-mark" aria-hidden="true">H</span>
+            <img
+              class="identity-mark"
+              src={`${props.basePath}/assets/hoocloak-logo.png`}
+              alt=""
+              aria-hidden="true"
+            />
             <span class="brand">Hoocloak</span>
           </div>
           <p class="eyebrow">Development identity</p>
