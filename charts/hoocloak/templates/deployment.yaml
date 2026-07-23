@@ -53,13 +53,14 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-              protocol: TCP
           {{- if .Values.startupProbe.enabled }}
           startupProbe:
-            httpGet:
-              path: /ready
-              port: http
-              scheme: HTTP
+            exec:
+              command:
+                - /hoocloak
+                - health
+                - --url
+                - http://127.0.0.1:8080/ready
             initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.startupProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
@@ -67,10 +68,12 @@ spec:
           {{- end }}
           {{- if .Values.livenessProbe.enabled }}
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: http
-              scheme: HTTP
+            exec:
+              command:
+                - /hoocloak
+                - health
+                - --url
+                - http://127.0.0.1:8080/ready
             initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
@@ -78,10 +81,12 @@ spec:
           {{- end }}
           {{- if .Values.readinessProbe.enabled }}
           readinessProbe:
-            httpGet:
-              path: /ready
-              port: http
-              scheme: HTTP
+            exec:
+              command:
+                - /hoocloak
+                - health
+                - --url
+                - http://127.0.0.1:8080/ready
             initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
@@ -110,7 +115,6 @@ spec:
         - name: theme
           persistentVolumeClaim:
             claimName: {{ .Values.theme.existingClaim }}
-            readOnly: {{ .Values.theme.readOnly }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

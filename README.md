@@ -108,9 +108,10 @@ kubectl -n hoocloak port-forward svc/hoocloak 8080:8080
 The inline default configuration contains no users. Configure users explicitly
 for isolated local clusters, or prefer `existingConfigSecret` for shared
 clusters. Increment `existingConfigSecretVersion` after updating an external
-Secret to restart the pod and reload its immutable subPath mount. Optional
-Ingress, service-account, image digest, scheduling, resource, probe, and
-security-context settings are available in
+Secret to restart the pod and reload its immutable subPath mount. The default
+pod reserves 5m CPU and 16Mi memory while retaining a 128Mi memory limit for
+bursts and in-memory protocol state. Optional Ingress, service-account, image
+digest, scheduling, resource, probe, and security-context settings are in
 [`values.yaml`](charts/hoocloak/values.yaml). When enabling Ingress, terminate
 TLS there. With inline configuration, set `hoocloakConfig.base_url` to the exact
 external HTTPS root URL, including its trailing slash. With

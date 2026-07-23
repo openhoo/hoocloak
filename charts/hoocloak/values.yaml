@@ -26,6 +26,8 @@ podSecurityContext:
   runAsUser: 65532
   runAsGroup: 65532
   fsGroup: 65532
+  # Avoid recursively changing an already-correct external theme volume.
+  fsGroupChangePolicy: OnRootMismatch
   seccompProfile:
     type: RuntimeDefault
 
@@ -61,8 +63,8 @@ ingress:
 
 resources:
   requests:
-    cpu: 10m
-    memory: 32Mi
+    cpu: 5m
+    memory: 16Mi
   limits:
     memory: 128Mi
 
