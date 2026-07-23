@@ -1,5 +1,15 @@
 # hoocloak Changelog
 
+## 1.0.2 (2026-07-23)
+
+### Other Changes
+
+- **branding:** add logo and banner (4e5445b)
+
+### Performance
+
+- **container:** minimize image footprint (04b85af)
+
 ## 1.0.1 (2026-07-23)
 
 ### Other Changes
