@@ -27,6 +27,7 @@ import (
 	"github.com/rs/cors"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"github.com/zitadel/oidc/v3/pkg/op"
+	xhtml "golang.org/x/net/html"
 	"golang.org/x/text/language"
 
 	"github.com/openhoo/hoocloak/internal/config"
@@ -57,7 +58,10 @@ var supportedClaims = []string{
 	"c_hash", "at_hash", "azp", "preferred_username", "name", "email", "email_verified",
 }
 
-const maxFormBodyBytes = 64 << 10
+const (
+	maxFormBodyBytes       = 64 << 10
+	maxAuthorizeFieldBytes = 1024
+)
 
 type SigningKey struct {
 	Key *rsa.PrivateKey
@@ -164,7 +168,14 @@ func NewServer(cfg config.Config, keys map[string]SigningKey, logger *slog.Logge
 			corsOptions.AllowOriginFunc = func(string) bool { return false }
 		}
 		corsPolicy := cors.New(corsOptions)
-		realmRuntime.Handler = corsPolicy.Handler(realmMux)
+		protectedRealmHandler := corsPolicy.Handler(realmMux)
+		realmRuntime.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/device_authorization" {
+				http.NotFound(w, r)
+				return
+			}
+			protectedRealmHandler.ServeHTTP(w, r)
+		})
 		server.realms[realm.Name] = realmRuntime
 		probes = append(probes, op.ReadyStorage(store))
 		root.Handle(basePath+"/", http.StripPrefix(basePath, realmRuntime.Handler))
@@ -191,7 +202,11 @@ func loadUI(themeDir string) (*template.Template, fs.FS, error) {
 		return defaultUITemplates, defaultUIAssets, nil
 	}
 
-	themeFS := os.DirFS(themeDir)
+	root, err := os.OpenRoot(themeDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open theme root: %w", err)
+	}
+	themeFS := root.FS()
 	templates := template.New("theme").Funcs(uiTemplateFuncs).Option("missingkey=error")
 	for _, file := range []struct {
 		path string
@@ -244,13 +259,12 @@ func preflightUITemplates(templates *template.Template) error {
 			return fmt.Errorf("execute %s.html: %w", check.name, err)
 		}
 		output := rendered.String()
-		for _, rootRelative := range []string{`="/login`, `='/login`, `="/assets/`, `='/assets/`} {
-			if strings.Contains(output, rootRelative) {
-				return fmt.Errorf("execute %s.html: root-relative login and asset URLs are not allowed; use .BasePath", check.name)
-			}
+		if err := validateRealmRelativeURLs(output); err != nil {
+			return fmt.Errorf("execute %s.html: %w", check.name, err)
 		}
 		if check.template == "login" {
-			if err := validateLoginHTML(output, basePath, check.mode); err != nil {
+			data := check.data.(loginData)
+			if err := validateLoginHTML(output, basePath, check.mode, data.RequestID, data.CSRF); err != nil {
 				return fmt.Errorf("execute %s.html: %w", check.name, err)
 			}
 		}
@@ -258,32 +272,119 @@ func preflightUITemplates(templates *template.Template) error {
 	return nil
 }
 
+type loginControlValidation struct {
+	kind  string
+	value string
+}
+
+type loginFieldsetValidation struct {
+	depth           int
+	disabled        bool
+	firstLegendSeen bool
+	firstLegendOpen bool
+	legendDepth     int
+}
+
 type loginFormValidation struct {
 	postForms    int
 	inPost       bool
 	action       string
-	controls     map[string]string
+	controls     map[string]loginControlValidation
 	controlCount map[string]int
+	fieldsets    []loginFieldsetValidation
+	elements     []string
 }
 
-func validateLoginHTML(document, basePath, mode string) error {
-	validation := loginFormValidation{controls: make(map[string]string), controlCount: make(map[string]int)}
-	for offset := 0; ; {
-		name, attributes, closing, next, ok, err := nextHTMLTag(document, offset)
+func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
+	validation := loginFormValidation{controls: make(map[string]loginControlValidation), controlCount: make(map[string]int)}
+	tokenizer := xhtml.NewTokenizer(strings.NewReader(document))
+	templateDepth := 0
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == xhtml.ErrorToken {
+			if err := tokenizer.Err(); err != nil && !errors.Is(err, io.EOF) {
+				return fmt.Errorf("parse rendered HTML: %w", err)
+			}
+			break
+		}
+		if tokenType != xhtml.StartTagToken && tokenType != xhtml.SelfClosingTagToken && tokenType != xhtml.EndTagToken {
+			continue
+		}
+		closing := tokenType == xhtml.EndTagToken
+		name, attributes, err := validatedHTMLTag(tokenizer, closing)
 		if err != nil {
 			return fmt.Errorf("parse rendered HTML: %w", err)
 		}
-		if !ok {
-			break
-		}
-		offset = next
-		if name == "form" {
+
+		if name == "template" {
 			if closing {
-				validation.inPost = false
-				continue
+				if templateDepth > 0 {
+					templateDepth--
+				}
+			} else {
+				templateDepth++
 			}
+			continue
+		}
+		if templateDepth > 0 {
+			continue
+		}
+
+		if closing {
+			match := -1
+			for index := len(validation.elements) - 1; index >= 0; index-- {
+				if validation.elements[index] == name {
+					match = index
+					break
+				}
+			}
+			if match >= 0 {
+				if name == "legend" {
+					for index := len(validation.fieldsets) - 1; index >= 0; index-- {
+						fieldset := &validation.fieldsets[index]
+						if fieldset.firstLegendOpen && fieldset.legendDepth == match {
+							fieldset.firstLegendOpen = false
+							break
+						}
+					}
+				}
+				validation.elements = validation.elements[:match]
+				for len(validation.fieldsets) > 0 && validation.fieldsets[len(validation.fieldsets)-1].depth >= match {
+					validation.fieldsets = validation.fieldsets[:len(validation.fieldsets)-1]
+				}
+			}
+			if name == "form" {
+				validation.inPost = false
+			}
+			continue
+		}
+
+		if name == "legend" && len(validation.elements) > 0 && validation.elements[len(validation.elements)-1] == "fieldset" {
+			fieldsetDepth := len(validation.elements) - 1
+			for index := len(validation.fieldsets) - 1; index >= 0; index-- {
+				fieldset := &validation.fieldsets[index]
+				if fieldset.depth == fieldsetDepth {
+					if !fieldset.firstLegendSeen {
+						fieldset.firstLegendSeen = true
+						fieldset.firstLegendOpen = true
+						fieldset.legendDepth = len(validation.elements)
+					}
+					break
+				}
+			}
+		}
+		if name == "fieldset" {
+			_, disabled := attributes["disabled"]
+			validation.fieldsets = append(validation.fieldsets, loginFieldsetValidation{
+				depth: len(validation.elements), disabled: disabled, legendDepth: -1,
+			})
+		}
+		if name == "form" {
 			if validation.inPost {
 				return errors.New("nested forms are not allowed")
+			}
+			if enctype := attributes["enctype"]; strings.EqualFold(enctype, "multipart/form-data") || strings.EqualFold(enctype, "text/plain") {
+				return errors.New("login form must use application/x-www-form-urlencoded encoding")
 			}
 			if strings.EqualFold(attributes["method"], http.MethodPost) {
 				validation.postForms++
@@ -292,22 +393,60 @@ func validateLoginHTML(document, basePath, mode string) error {
 				}
 				validation.inPost = true
 				validation.action = attributes["action"]
-				validation.controls = make(map[string]string)
+				validation.controls = make(map[string]loginControlValidation)
 				validation.controlCount = make(map[string]int)
 			}
-			continue
 		}
-		if validation.inPost && !closing && (name == "input" || name == "select" || name == "textarea" || name == "button") {
-			if controlName := attributes["name"]; controlName != "" {
-				switch controlName {
-				case "authRequestID", "csrf", "identity", "username", "password":
-					validation.controlCount[controlName]++
-					if validation.controlCount[controlName] > 1 {
-						return fmt.Errorf("login form must not contain duplicate %s controls", controlName)
+		if name == "input" || name == "select" || name == "textarea" || name == "button" {
+			controlName := attributes["name"]
+			sensitive := strings.EqualFold(controlName, "authRequestID") ||
+				strings.EqualFold(controlName, "csrf") ||
+				strings.EqualFold(controlName, "identity") ||
+				strings.EqualFold(controlName, "username") ||
+				strings.EqualFold(controlName, "password")
+			if name == "input" || name == "button" {
+				if _, exists := attributes["formaction"]; exists {
+					return errors.New("login controls must not override the form action")
+				}
+				if _, exists := attributes["formmethod"]; exists {
+					return errors.New("login controls must not override the form method")
+				}
+				if _, exists := attributes["formenctype"]; exists {
+					return errors.New("login controls must not override the form encoding")
+				}
+			}
+			if sensitive {
+				disabled := false
+				for _, fieldset := range validation.fieldsets {
+					if fieldset.disabled && !fieldset.firstLegendOpen {
+						disabled = true
+						break
 					}
 				}
-				validation.controls[controlName] = strings.ToLower(attributes["type"])
+				if _, exists := attributes["disabled"]; exists || disabled {
+					return fmt.Errorf("login form %s control must not be disabled", controlName)
+				}
+				if _, exists := attributes["form"]; exists {
+					return fmt.Errorf("login form %s control must not use form reassociation", controlName)
+				}
 			}
+			if validation.inPost && controlName != "" {
+				if sensitive {
+					for existing := range validation.controls {
+						if strings.EqualFold(existing, controlName) {
+							validation.controlCount[existing]++
+							return fmt.Errorf("login form must not contain duplicate %s controls", controlName)
+						}
+					}
+					validation.controlCount[controlName]++
+				}
+				validation.controls[controlName] = loginControlValidation{
+					kind: strings.ToLower(attributes["type"]), value: attributes["value"],
+				}
+			}
+		}
+		if !isVoidHTMLElement(name) {
+			validation.elements = append(validation.elements, name)
 		}
 	}
 	if validation.postForms != 1 {
@@ -316,16 +455,23 @@ func validateLoginHTML(document, basePath, mode string) error {
 	if validation.action != basePath+"/login" {
 		return fmt.Errorf("login form action must be exactly %q", basePath+"/login")
 	}
-	for _, hidden := range []string{"authRequestID", "csrf"} {
-		if validation.controls[hidden] != "hidden" {
-			return fmt.Errorf("login form must contain hidden %s control", hidden)
+	for _, hidden := range []struct {
+		name  string
+		value string
+	}{{name: "authRequestID", value: requestID}, {name: "csrf", value: csrf}} {
+		control := validation.controls[hidden.name]
+		if control.kind != "hidden" {
+			return fmt.Errorf("login form must contain hidden %s control", hidden.name)
+		}
+		if control.value != hidden.value {
+			return fmt.Errorf("login form hidden %s value must exactly match rendered data", hidden.name)
 		}
 	}
 	if mode == config.LoginModePassword {
 		if _, exists := validation.controls["username"]; !exists {
 			return errors.New("password login form must contain username control")
 		}
-		if validation.controls["password"] != "password" {
+		if validation.controls["password"].kind != "password" {
 			return errors.New("password login form must contain password control")
 		}
 	} else if _, exists := validation.controls["identity"]; !exists {
@@ -334,108 +480,172 @@ func validateLoginHTML(document, basePath, mode string) error {
 	return nil
 }
 
-func nextHTMLTag(document string, offset int) (string, map[string]string, bool, int, bool, error) {
-	for {
-		start := strings.IndexByte(document[offset:], '<')
-		if start < 0 {
-			return "", nil, false, len(document), false, nil
+func validatedHTMLTag(tokenizer *xhtml.Tokenizer, closing bool) (string, map[string]string, error) {
+	rawName, hasAttributes := tokenizer.TagName()
+	name := string(rawName)
+	if closing {
+		return name, nil, nil
+	}
+	if err := validateRawHTMLAttributeNames(tokenizer.Raw()); err != nil {
+		return "", nil, err
+	}
+	attributes := make(map[string]string)
+	for hasAttributes {
+		rawKey, rawValue, more := tokenizer.TagAttr()
+		key := string(rawKey)
+		if _, exists := attributes[key]; exists {
+			return "", nil, fmt.Errorf("attribute %q must not be repeated", key)
 		}
-		start += offset
-		if strings.HasPrefix(document[start:], "<!--") {
-			end := strings.Index(document[start+4:], "-->")
-			if end < 0 {
-				return "", nil, false, 0, false, errors.New("unterminated comment")
-			}
-			offset = start + 4 + end + 3
+		attributes[key] = string(rawValue)
+		hasAttributes = more
+	}
+	return name, attributes, nil
+}
+
+func validateRawHTMLAttributeNames(raw []byte) error {
+	offset := 1
+	for offset < len(raw) && !strings.ContainsRune(" \t\r\n\f/>", rune(raw[offset])) {
+		offset++
+	}
+	seen := make(map[string]struct{})
+	for offset < len(raw) {
+		for offset < len(raw) && strings.ContainsRune(" \t\r\n\f/", rune(raw[offset])) {
+			offset++
+		}
+		if offset >= len(raw) || raw[offset] == '>' {
+			return nil
+		}
+		nameStart := offset
+		for offset < len(raw) && !strings.ContainsRune(" \t\r\n\f=/>", rune(raw[offset])) {
+			offset++
+		}
+		if nameStart == offset {
+			return errors.New("attribute name must not be empty")
+		}
+		name := strings.ToLower(string(raw[nameStart:offset]))
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("attribute %q must not be repeated", name)
+		}
+		seen[name] = struct{}{}
+		for offset < len(raw) && strings.ContainsRune(" \t\r\n\f", rune(raw[offset])) {
+			offset++
+		}
+		if offset >= len(raw) || raw[offset] != '=' {
 			continue
 		}
-		quote := byte(0)
-		end := start + 1
-		for ; end < len(document); end++ {
-			character := document[end]
-			if quote != 0 {
-				if character == quote {
-					quote = 0
-				}
-				continue
-			}
-			if character == '\'' || character == '"' {
-				quote = character
-			} else if character == '>' {
-				break
-			}
+		offset++
+		for offset < len(raw) && strings.ContainsRune(" \t\r\n\f", rune(raw[offset])) {
+			offset++
 		}
-		if end == len(document) {
-			return "", nil, false, 0, false, errors.New("unterminated tag")
+		if offset >= len(raw) {
+			return fmt.Errorf("attribute %q has no value", name)
 		}
-		contents := strings.TrimSpace(document[start+1 : end])
-		if contents == "" || contents[0] == '!' || contents[0] == '?' {
-			offset = end + 1
+		if raw[offset] == '\'' || raw[offset] == '"' {
+			quote := raw[offset]
+			offset++
+			for offset < len(raw) && raw[offset] != quote {
+				offset++
+			}
+			if offset >= len(raw) {
+				return fmt.Errorf("attribute %q has an unterminated value", name)
+			}
+			offset++
 			continue
 		}
-		closing := contents[0] == '/'
-		if closing {
-			contents = strings.TrimSpace(contents[1:])
+		for offset < len(raw) && !strings.ContainsRune(" \t\r\n\f>", rune(raw[offset])) {
+			offset++
 		}
-		nameEnd := strings.IndexAny(contents, " \t\r\n/")
-		if nameEnd < 0 {
-			nameEnd = len(contents)
-		}
-		name := strings.ToLower(contents[:nameEnd])
-		attributes, err := parseHTMLAttributes(contents[nameEnd:])
-		return name, attributes, closing, end + 1, true, err
+	}
+	return nil
+}
+
+func isVoidHTMLElement(name string) bool {
+	switch name {
+	case "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr":
+		return true
+	default:
+		return false
 	}
 }
 
-func parseHTMLAttributes(contents string) (map[string]string, error) {
-	attributes := make(map[string]string)
-	for offset := 0; offset < len(contents); {
-		for offset < len(contents) && (contents[offset] == ' ' || contents[offset] == '\t' || contents[offset] == '\r' || contents[offset] == '\n' || contents[offset] == '/') {
-			offset++
-		}
-		if offset == len(contents) {
-			break
-		}
-		nameStart := offset
-		for offset < len(contents) && !strings.ContainsRune(" \t\r\n=/", rune(contents[offset])) {
-			offset++
-		}
-		name := strings.ToLower(contents[nameStart:offset])
-		for offset < len(contents) && strings.ContainsRune(" \t\r\n", rune(contents[offset])) {
-			offset++
-		}
-		value := ""
-		if offset < len(contents) && contents[offset] == '=' {
-			offset++
-			for offset < len(contents) && strings.ContainsRune(" \t\r\n", rune(contents[offset])) {
-				offset++
+func validateRealmRelativeURLs(document string) error {
+	tokenizer := xhtml.NewTokenizer(strings.NewReader(document))
+	templateDepth := 0
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == xhtml.ErrorToken {
+			if err := tokenizer.Err(); err != nil && !errors.Is(err, io.EOF) {
+				return fmt.Errorf("parse rendered HTML: %w", err)
 			}
-			if offset == len(contents) {
-				return nil, fmt.Errorf("attribute %q has no value", name)
-			}
-			if contents[offset] == '\'' || contents[offset] == '"' {
-				quote := contents[offset]
-				offset++
-				valueStart := offset
-				for offset < len(contents) && contents[offset] != quote {
-					offset++
+			return nil
+		}
+		if tokenType != xhtml.StartTagToken && tokenType != xhtml.SelfClosingTagToken && tokenType != xhtml.EndTagToken {
+			continue
+		}
+		closing := tokenType == xhtml.EndTagToken
+		name, attributes, err := validatedHTMLTag(tokenizer, closing)
+		if err != nil {
+			return fmt.Errorf("parse rendered HTML: %w", err)
+		}
+		if name == "template" {
+			if tokenType == xhtml.EndTagToken {
+				if templateDepth > 0 {
+					templateDepth--
 				}
-				if offset == len(contents) {
-					return nil, fmt.Errorf("attribute %q has an unterminated value", name)
-				}
-				value = contents[valueStart:offset]
-				offset++
 			} else {
-				valueStart := offset
-				for offset < len(contents) && !strings.ContainsRune(" \t\r\n/", rune(contents[offset])) {
-					offset++
-				}
-				value = contents[valueStart:offset]
+				templateDepth++
+			}
+			continue
+		}
+		if templateDepth > 0 || closing {
+			continue
+		}
+		for _, name := range []string{"action", "background", "data", "formaction", "href", "poster", "src", "xlink:href"} {
+			if isRootRelativeLoginURL(attributes[name]) {
+				return errors.New("root-relative login and asset URLs are not allowed; use .BasePath")
 			}
 		}
-		attributes[name] = value
+		for _, sourceSet := range []string{attributes["imagesrcset"], attributes["srcset"]} {
+			for _, candidate := range strings.Split(sourceSet, ",") {
+				fields := strings.Fields(candidate)
+				if len(fields) > 0 && isRootRelativeLoginURL(fields[0]) {
+					return errors.New("root-relative login and asset URLs are not allowed; use .BasePath")
+				}
+			}
+		}
+		for _, urlList := range []string{attributes["archive"], attributes["ping"]} {
+			for _, candidate := range strings.Fields(urlList) {
+				if isRootRelativeLoginURL(candidate) {
+					return errors.New("root-relative login and asset URLs are not allowed; use .BasePath")
+				}
+			}
+		}
 	}
-	return attributes, nil
+}
+
+func isRootRelativeLoginURL(value string) bool {
+	candidate := strings.Map(func(character rune) rune {
+		switch character {
+		case '\t', '\n', '\r':
+			return -1
+		default:
+			return character
+		}
+	}, strings.TrimFunc(value, func(character rune) bool { return character <= 0x20 }))
+	candidate = strings.ReplaceAll(candidate, `\`, "/")
+	if !strings.HasPrefix(candidate, "/") || strings.HasPrefix(candidate, "//") {
+		return false
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return true
+	}
+	if parsed.IsAbs() || parsed.Host != "" {
+		return false
+	}
+	normalizedPath := path.Clean(parsed.Path)
+	return normalizedPath == "/login" || strings.HasPrefix(normalizedPath, "/login/") ||
+		normalizedPath == "/assets" || strings.HasPrefix(normalizedPath, "/assets/")
 }
 
 func keyDerivation(key *rsa.PrivateKey) [32]byte {
@@ -503,17 +713,22 @@ func discoveryMetadata(issuer string, scopes []string) map[string]any {
 
 func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/oauth/token", "/oauth/introspect", "/revoke":
-			if r.Method != http.MethodPost {
-				w.Header().Set("Allow", http.MethodPost)
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
+		if r.URL.Path == "/oauth/token" {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+		}
+		if r.URL.Path == "/device_authorization" {
+			http.NotFound(w, r)
+			return
+		}
+		if allow, known := providerEndpointMethods(r.URL.Path); known && !methodAllowed(r.Method, allow) {
+			w.Header().Set("Allow", allow)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
 		if r.Method == http.MethodPost {
 			switch r.URL.Path {
-			case "/authorize", "/oauth/token", "/oauth/introspect", "/revoke", "/end_session":
+			case "/authorize", "/oauth/token", "/oauth/introspect", "/revoke", "/userinfo", "/end_session":
 				r.Body = http.MaxBytesReader(w, r.Body, maxFormBodyBytes)
 			}
 		}
@@ -533,6 +748,13 @@ func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 			}
 			if !rejectRepeatedFormParameters(w, r, "token", "token_type_hint", "client_id", "client_secret") {
 				return
+			}
+		case "/userinfo":
+			if r.Method == http.MethodPost {
+				if err := r.ParseForm(); err != nil {
+					oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
+					return
+				}
 			}
 		case "/end_session":
 			if err := r.ParseForm(); err != nil {
@@ -555,17 +777,68 @@ func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 	})
 }
 
+func providerEndpointMethods(providerPath string) (string, bool) {
+	switch providerPath {
+	case "/authorize":
+		return "GET, POST", true
+	case "/authorize/callback":
+		return http.MethodGet, true
+	case "/oauth/token", "/oauth/introspect", "/revoke":
+		return http.MethodPost, true
+	case "/userinfo", "/end_session":
+		return "GET, POST", true
+	case "/keys":
+		return "GET, HEAD", true
+	default:
+		return "", false
+	}
+}
+
+func methodAllowed(method, allow string) bool {
+	for _, allowed := range strings.Split(allow, ", ") {
+		if method == allowed {
+			return true
+		}
+	}
+	return false
+}
+func validS256CodeChallenge(value string) bool {
+	if len(value) != 43 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') &&
+			character != '-' && character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool {
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
 		return false
 	}
-	if !rejectRepeatedFormParameters(w, r, "client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method") {
+	if !rejectRepeatedFormParameters(w, r, "client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method", "state", "nonce") {
 		return false
+	}
+	for _, field := range []string{"state", "nonce"} {
+		if len(r.Form.Get(field)) > maxAuthorizeFieldBytes {
+			oauthError(w, http.StatusBadRequest, "invalid_request", field+" must not exceed 1024 bytes", false)
+			return false
+		}
 	}
 	client := s.Store.clients[r.Form.Get("client_id")]
 	if client == nil || client.config.Type != config.ClientTypeSPA {
 		return true
+	}
+	if redirectURI := r.Form.Get("redirect_uri"); !slices.Contains(client.config.RedirectURIs, redirectURI) {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "redirect_uri is not registered", false)
+		return false
 	}
 	if r.Form.Get("response_type") != "code" {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "response_type must be code", false)
@@ -586,8 +859,8 @@ func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool
 			return false
 		}
 	}
-	if r.Form.Get("code_challenge") == "" || r.Form.Get("code_challenge_method") != "S256" {
-		oauthError(w, http.StatusBadRequest, "invalid_request", "PKCE with code_challenge_method=S256 is required", false)
+	if !validS256CodeChallenge(r.Form.Get("code_challenge")) || r.Form.Get("code_challenge_method") != "S256" {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "PKCE requires a 43-character S256 code challenge", false)
 		return false
 	}
 	return true

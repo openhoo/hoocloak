@@ -2,7 +2,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "hoocloak.fullname" . }}
+  name: {{ include "hoocloak.fullname" . | quote }}
   labels:
     {{- include "hoocloak.labels" . | nindent 4 }}
 spec:
@@ -18,7 +18,7 @@ spec:
         {{- if .Values.existingConfigSecret }}
         checksum/external-config: {{ .Values.existingConfigSecretVersion | quote }}
         {{- else }}
-        checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -29,7 +29,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      serviceAccountName: {{ include "hoocloak.serviceAccountName" . }}
+      serviceAccountName: {{ include "hoocloak.serviceAccountName" . | quote }}
       automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -41,7 +41,7 @@ spec:
       initContainers:
         - name: install-theme
           image: {{ .Values.theme.image.reference | quote }}
-          imagePullPolicy: {{ .Values.theme.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.theme.image.pullPolicy | quote }}
           command:
             - /bin/cp
           args:
@@ -59,7 +59,7 @@ spec:
       containers:
         - name: hoocloak
           image: {{ include "hoocloak.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           args:
             - serve
             - --config
@@ -124,20 +124,20 @@ spec:
               readOnly: true
             {{- if .Values.theme.image.reference }}
             - name: theme
-              mountPath: {{ .Values.theme.mountPath }}
+              mountPath: {{ .Values.theme.mountPath | quote }}
               readOnly: true
             {{- end }}
       volumes:
         - name: config
           secret:
-            secretName: {{ include "hoocloak.configSecretName" . }}
+            secretName: {{ include "hoocloak.configSecretName" . | quote }}
             items:
               - key: {{ ternary .Values.existingConfigSecretKey "config.yaml" (ne .Values.existingConfigSecret "") | quote }}
                 path: config.yaml
         {{- if .Values.theme.image.reference }}
         - name: theme
           emptyDir:
-            sizeLimit: {{ .Values.theme.emptyDir.sizeLimit }}
+            sizeLimit: {{ .Values.theme.emptyDir.sizeLimit | quote }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

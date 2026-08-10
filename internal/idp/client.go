@@ -12,14 +12,19 @@ import (
 )
 
 type Client struct {
-	config   config.Client
-	idTTL    time.Duration
-	basePath string
-	dev      bool
+	config               config.Client
+	providerRedirectURIs []string
+	idTTL                time.Duration
+	basePath             string
+	dev                  bool
 }
 
 func newClient(c config.Client, idTTL time.Duration, basePath string) *Client {
 	dev := false
+	providerRedirectURIs := make([]string, len(c.RedirectURIs))
+	for index, raw := range c.RedirectURIs {
+		providerRedirectURIs[index], _ = url.QueryUnescape(raw)
+	}
 	if c.Type == config.ClientTypeSPA {
 		for _, raw := range c.RedirectURIs {
 			u, _ := url.Parse(raw)
@@ -28,11 +33,11 @@ func newClient(c config.Client, idTTL time.Duration, basePath string) *Client {
 			}
 		}
 	}
-	return &Client{config: c, idTTL: idTTL, basePath: basePath, dev: dev}
+	return &Client{config: c, providerRedirectURIs: providerRedirectURIs, idTTL: idTTL, basePath: basePath, dev: dev}
 }
 
 func (c *Client) GetID() string          { return c.config.ID }
-func (c *Client) RedirectURIs() []string { return slices.Clone(c.config.RedirectURIs) }
+func (c *Client) RedirectURIs() []string { return slices.Clone(c.providerRedirectURIs) }
 func (c *Client) PostLogoutRedirectURIs() []string {
 	return slices.Clone(c.config.PostLogoutRedirectURIs)
 }

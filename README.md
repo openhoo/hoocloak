@@ -185,11 +185,11 @@ realms:
 
 ### Validation rules
 
-- Configuration `base_url`, redirects, and origins are absolute credential-free HTTP(S) URLs, reject wildcards and backslashes, and allow cleartext HTTP only for loopback, `localhost`, and `.localhost` hosts. Health CLI targets are separately validated as absolute credential-free HTTP(S) URLs and may use non-local HTTP.
-- `base_url` is an exact root URL with trailing `/`. Redirects may have paths/query strings but no fragment. Origins have no path, query, or fragment and must use canonical lowercase scheme/host form, no trailing-dot host, and no explicit default port.
-- `listen` must contain a numeric port from 1 through 65535. Token durations must be positive. Realms must be nonempty and uniquely named.
+- Configuration `base_url`, redirects, and origins are absolute credential-free HTTP(S) URLs with nonempty hosts; any explicit port must be numeric from 1 through 65535. They reject wildcards and backslashes and allow cleartext HTTP only for loopback, `localhost`, and `.localhost` hosts. Health CLI targets are separately validated as absolute credential-free HTTP(S) URLs and may use non-local HTTP.
+- `base_url` is an exact root URL with a lowercase scheme and trailing `/`. Redirects may have paths/query strings but no fragment. Origins have no path, query, or fragment and must use canonical lowercase scheme/host form, no trailing-dot host, and no explicit default port.
+- `listen` must contain a numeric port from 1 through 65535. Token durations must be positive. Password and service-secret hashes must be complete bcrypt serializations at cost 10, matching `hoocloak hash`. Realms must be nonempty and uniquely named.
 - Within a realm, user and client IDs share one exact-match namespace. Usernames reject surrounding whitespace and are unique after case folding. IDs and usernames may repeat in different realms because keys, clients, users, protocol state, and browser policy are realm-isolated.
-- Bcrypt fields must parse as bcrypt hashes. Roles, permissions, audiences, and scopes reject empty, whitespace-padded, or duplicate values. Scope/permission strings must be valid printable OAuth scope tokens; permissions cannot use reserved OIDC scope names.
+- Roles, permissions, audiences, and scopes reject empty, whitespace-padded, or duplicate values. Scope/permission strings must be valid printable OAuth scope tokens; permissions cannot use reserved OIDC scope names.
 - Supported reserved scopes are `openid`, `profile`, `email`, and `offline_access`. `phone` and `address` are reserved but intentionally unsupported and rejected. Any other valid token is an application scope.
 - SPA clients have no secret, must allow `openid`, and require redirects and origins. Service clients require a bcrypt secret, forbid browser redirect/origin fields and every reserved OIDC scope, and require every allowed custom scope to appear in that client's permissions.
 

@@ -23,11 +23,11 @@ spec:
   containers:
     - name: readiness
       image: {{ include "hoocloak.image" . | quote }}
-      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
       args:
         - health
         - --url
-        - http://{{ include "hoocloak.fullname" . }}:{{ .Values.service.port }}/ready
+        - {{ printf "http://%s:%d/ready" (include "hoocloak.fullname" .) (int .Values.service.port) | quote }}
         - --timeout
         - 5s
       securityContext:

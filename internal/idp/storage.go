@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -24,12 +25,27 @@ import (
 // dummyPasswordHash is deliberately public and only equalizes the work done for
 // unknown principals. Authentication still fails independently of this value.
 // #nosec G101 -- this is a timing-defense fixture, not a credential.
-const dummyPasswordHash = "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+const (
+	dummyPasswordHash      = "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"
+	maxPendingAuthRequests = 1024
+)
 
 var (
-	errInvalidCredentials = errors.New("Invalid username or password.")
-	errAuthRequestDone    = errors.New("authorization request is already complete")
+	errInvalidCredentials   = errors.New("Invalid username or password.")
+	errAuthRequestDone      = errors.New("authorization request is already complete")
+	errCredentialChecksBusy = errors.New("too many concurrent credential checks")
+	credentialHashSlots     = make(chan struct{}, max(1, runtime.GOMAXPROCS(0)))
 )
+
+func compareCredential(hash, secret string) (bool, error) {
+	select {
+	case credentialHashSlots <- struct{}{}:
+		defer func() { <-credentialHashSlots }()
+	default:
+		return false, errCredentialChecksBusy
+	}
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(secret)) == nil, nil
+}
 
 var (
 	_ op.Storage                        = (*Store)(nil)
@@ -219,6 +235,9 @@ func (s *Store) CreateAuthRequest(_ context.Context, request *oidc.AuthRequest, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
+	if len(s.authRequests) >= maxPendingAuthRequests {
+		return nil, oidc.ErrServerError().WithDescription("too many pending authorization requests")
+	}
 	s.authRequests[id] = auth
 	s.scheduleExpiryLocked(auth.expires)
 	return auth, nil
@@ -303,7 +322,10 @@ func (s *Store) Authenticate(requestID, username, password string) error {
 		hash = user.PasswordHash
 	}
 	s.mu.Unlock()
-	passwordOK := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+	passwordOK, err := compareCredential(hash, password)
+	if err != nil {
+		return err
+	}
 	if !requestOK {
 		return errors.New("authorization request is missing or expired")
 	}
@@ -613,11 +635,15 @@ func (s *Store) GetClientByClientID(_ context.Context, id string) (op.Client, er
 }
 func (s *Store) AuthorizeClientIDSecret(_ context.Context, id, secret string) error {
 	client := s.clients[id]
-	if client == nil || client.config.Type != config.ClientTypeService {
-		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(secret))
-		return errors.New("invalid client credentials")
+	hash := dummyPasswordHash
+	if client != nil && client.config.Type == config.ClientTypeService {
+		hash = client.config.SecretHash
 	}
-	if bcrypt.CompareHashAndPassword([]byte(client.config.SecretHash), []byte(secret)) != nil {
+	valid, err := compareCredential(hash, secret)
+	if err != nil {
+		return err
+	}
+	if client == nil || client.config.Type != config.ClientTypeService || !valid {
 		return errors.New("invalid client credentials")
 	}
 	return nil

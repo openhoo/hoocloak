@@ -18,7 +18,7 @@ realms:
     users:
       - id: alice
         username: Alice
-        password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"
         name: Alice
         email: alice@example.test
         email_verified: true
@@ -34,7 +34,7 @@ realms:
         allowed_scopes: [openid, profile, email, offline_access, api.read]
       - id: worker
         type: service
-        secret_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        secret_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"
         audiences: [hoocloak-api]
         allowed_scopes: [api.read]
         roles: [worker]
@@ -43,7 +43,7 @@ realms:
     users:
       - id: alice
         username: Alice
-        password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"
         name: Partner Alice
         email: partner-alice@example.test
         email_verified: true
@@ -52,7 +52,7 @@ realms:
     clients:
       - id: worker
         type: service
-        secret_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        secret_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"
         audiences: [partner-api]
         allowed_scopes: [partner.read]
         roles: [partner-worker]
@@ -82,25 +82,37 @@ func TestLoadRejectsStrictInvalidConfiguration(t *testing.T) {
 		{"base URL query", replace("http://hoocloak.localhost:8080/", "http://hoocloak.localhost:8080/?tenant=dev"), "absolute root URL ending in /"},
 		{"base URL fragment", replace("http://hoocloak.localhost:8080/", "http://hoocloak.localhost:8080/#dev"), "absolute root URL ending in /"},
 		{"base URL scheme", replace("http://hoocloak.localhost:8080/", "ftp://hoocloak.localhost:8080/"), "base_url scheme must be http or https"},
-		{"base URL missing slash", replace("http://hoocloak.localhost:8080/", "http://hoocloak.localhost:8080"), "absolute root URL ending in /"},
+		{"base URL uppercase scheme", replace("http://hoocloak.localhost:8080/", "HTTP://hoocloak.localhost:8080/"), "base_url scheme must use canonical lowercase spelling"},
+		{"base URL hostless", replace("http://hoocloak.localhost:8080/", "https://:443/"), "base_url must be an absolute URL without credentials"},
+		{"base URL empty port", replace("http://hoocloak.localhost:8080/", "https://id.example.test:/"), "base_url port must be a number from 1 to 65535"},
+		{"base URL zero port", replace("http://hoocloak.localhost:8080/", "https://id.example.test:0/"), "base_url port must be a number from 1 to 65535"},
+		{"base URL oversized port", replace("http://hoocloak.localhost:8080/", "https://id.example.test:65536/"), "base_url port must be a number from 1 to 65535"},
 		{"wildcard redirect", replace("http://app.localhost:5173/auth/callback", "http://*.localhost:5173/auth/callback"), "must not contain wildcards"},
 		{"redirect fragment", replace("http://app.localhost:5173/auth/callback", "http://app.localhost:5173/auth/callback#fragment"), "fragments are not allowed"},
 		{"non-local cleartext redirect", replace("http://app.localhost:5173/auth/callback", "http://app.example.test/auth/callback"), "cleartext redirect URI is allowed only"},
+		{"redirect hostless", replace("http://app.localhost:5173/auth/callback", "https://:443/callback"), "redirect URI must be an absolute URL without credentials"},
+		{"redirect zero port", replace("http://app.localhost:5173/auth/callback", "http://app.localhost:0/callback"), "redirect URI port must be a number from 1 to 65535"},
+		{"redirect malformed query escape", replace("http://app.localhost:5173/auth/callback", `"http://app.localhost:5173/auth/callback?next=%ZZ"`), "query contains invalid percent-encoding"},
+		{"origin hostless", replace("origins: [http://app.localhost:5173]", "origins: [https://:443]"), "origin must be an absolute URL without credentials"},
+		{"origin oversized port", replace("origins: [http://app.localhost:5173]", "origins: [https://app.example.test:65536]"), "origin port must be a number from 1 to 65535"},
 		{"origin path", replace("origins: [http://app.localhost:5173]", "origins: [http://app.localhost:5173/path]"), "must not contain a path, query, or fragment"},
 		{"origin uppercase scheme", replace("origins: [http://app.localhost:5173]", "origins: [HTTP://app.localhost:5173]"), "must use canonical form"},
 		{"origin uppercase host", replace("origins: [http://app.localhost:5173]", "origins: [http://APP.localhost:5173]"), "must use canonical form"},
 		{"origin explicit HTTP default port", replace("origins: [http://app.localhost:5173]", "origins: [http://app.localhost:80]"), "must use canonical form"},
 		{"origin explicit HTTPS default port", replace("origins: [http://app.localhost:5173]", "origins: [https://app.example.test:443]"), "must use canonical form"},
 		{"origin trailing-dot host", replace("origins: [http://app.localhost:5173]", "origins: [http://app.localhost.:5173]"), "must use canonical form"},
-		{"spa secret", replace("        type: spa\n", "        type: spa\n        secret_hash: \"$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme\"\n"), "spa clients must not define secret_hash"},
-		{"spa missing openid", replace("[openid, profile, email, offline_access, api.read]", "[profile, email, offline_access, api.read]"), "spa clients must allow openid"},
+		{"spa secret", replace("        type: spa\n", "        type: spa\n        secret_hash: \"$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA\"\n"), "spa clients must not define secret_hash"},
+		{"user malformed bcrypt", replace("$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA", "$2a$10$7Eq!tq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"), "password_hash: must be a valid bcrypt hash"},
+		{"user bcrypt wrong cost", replace("$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA", "$2a$11$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"), "password_hash: must be a valid bcrypt hash"},
+		{"service malformed bcrypt", replace(`secret_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"`, `secret_hash: "$2a$10$7Eq!tq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"`), "secret_hash: must be a valid bcrypt hash"},
+		{"service bcrypt wrong cost", replace(`secret_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"`, `secret_hash: "$2a$11$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"`), "secret_hash: must be a valid bcrypt hash"},
 		{"invalid allowed scope token", replace("[openid, profile, email, offline_access, api.read]", "[openid, profile, email, offline_access, api read]"), "invalid OAuth scope token"},
 		{"service browser redirect", replace("        type: service\n", "        type: service\n        redirect_uris: [http://app.localhost:5173/callback]\n"), "service clients must not define browser redirects or origins"},
 		{"service reserved scope", replace("allowed_scopes: [api.read]\n        roles: [worker]", "allowed_scopes: [openid, api.read]\n        roles: [worker]"), "service clients must not allow reserved OIDC scope"},
 		{"duplicate user in one realm", func(s string) string {
 			duplicate := `      - id: alice-two
         username: ALICE
-        password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+        password_hash: "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"
         name: Duplicate
         email: duplicate@example.test
         email_verified: true
@@ -121,6 +133,22 @@ func TestLoadRejectsStrictInvalidConfiguration(t *testing.T) {
 			_, err := Load(path)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Load() error = %v, want error containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsSupportedBcryptMinorVersions(t *testing.T) {
+	t.Parallel()
+	for _, minor := range []string{"a", "b", "y"} {
+		t.Run(minor, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			hashes := strings.ReplaceAll(validConfigYAML, "$2a$10$", "$2"+minor+"$10$")
+			if err := os.WriteFile(path, []byte(hashes), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err != nil {
+				t.Fatalf("Load() error = %v", err)
 			}
 		})
 	}

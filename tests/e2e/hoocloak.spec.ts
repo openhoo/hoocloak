@@ -46,26 +46,63 @@ async function callEndpoint(
   return card.locator("pre");
 }
 
+type ServiceAccessToken = {
+  access_token: string;
+  expires_in: number;
+  scope: string;
+  token_type: "Bearer";
+};
+
 async function serviceAccessToken(
   request: APIRequestContext,
   tokenIssuer: string,
   clientId: string,
   secret: string,
   scope: string,
-) {
+  expectedAudience: string,
+): Promise<ServiceAccessToken> {
   const tokenResponse = await request.post(`${tokenIssuer}/oauth/token`, {
     form: { grant_type: "client_credentials", scope },
     headers: {
       Authorization: `Basic ${Buffer.from(`${clientId}:${secret}`).toString("base64")}`,
     },
   });
-  expect(tokenResponse.ok()).toBeTruthy();
-  return (await tokenResponse.json()) as {
-    access_token: string;
-    expires_in: number;
-    scope: string;
-    token_type: string;
-  };
+  expect(tokenResponse.status()).toBeGreaterThanOrEqual(200);
+  expect(tokenResponse.status()).toBeLessThan(300);
+
+  const body = await tokenResponse.json();
+  expect(body).toEqual(
+    expect.objectContaining({
+      access_token: expect.any(String),
+      expires_in: expect.any(Number),
+      scope,
+      token_type: "Bearer",
+    }),
+  );
+  const token = body as Partial<ServiceAccessToken>;
+  expect(token.access_token).toBeTruthy();
+  expect(token.access_token?.split(".")).toHaveLength(3);
+
+  const [encodedHeader, encodedPayload] = token.access_token!.split(".");
+  let header: { typ?: unknown };
+  let claims: { iss?: unknown; aud?: unknown; scope?: unknown };
+  try {
+    header = JSON.parse(Buffer.from(encodedHeader, "base64url").toString("utf8")) as { typ?: unknown };
+    claims = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as {
+      iss?: unknown;
+      aud?: unknown;
+      scope?: unknown;
+    };
+  } catch {
+    throw new Error("service token did not contain valid JWT JSON");
+  }
+  expect(header.typ).toBe("JWT");
+  expect(claims.iss).toBe(tokenIssuer);
+  expect(claims.scope).toBe(scope);
+  const audiences = typeof claims.aud === "string" ? [claims.aud] : claims.aud;
+  expect(audiences).toEqual(expect.arrayContaining([expectedAudience]));
+  expect(audiences).toHaveLength(1);
+  return token as ServiceAccessToken;
 }
 
 test("public stack, security headers, discovery, and unauthenticated API are healthy", async ({
@@ -237,6 +274,7 @@ test("resource server rejects cross-realm tokens and the wrong hoocloak-api audi
     "example-worker",
     "dev-secret",
     "api.read",
+    "hoocloak-api",
   );
   expect(token).toMatchObject({
     scope: "api.read",
@@ -266,6 +304,7 @@ test("resource server rejects cross-realm tokens and the wrong hoocloak-api audi
     "example-worker",
     "partner-secret",
     "partner.read",
+    "hoocloak-api",
   );
   // The audience is valid for this API, so this proves cross-realm issuer/signing-key isolation.
   const partnerProfile = await request.get(`${api}/api/profile`, {
@@ -279,6 +318,7 @@ test("resource server rejects cross-realm tokens and the wrong hoocloak-api audi
     "wrong-audience-worker",
     "dev-secret",
     "api.read",
+    "other-api",
   );
   // The issuer is valid for this API, so this rejection specifically defends audience isolation.
   const wrongAudienceProfile = await request.get(`${api}/api/profile`, {

@@ -22,7 +22,6 @@ env:
 jobs:
   commitlint:
     name: Conventional Commits
-    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -129,6 +128,12 @@ jobs:
           helm template hoocloak charts/hoocloak --namespace hoocloak \
             --set-string 'theme.image.reference=registry.example.test/hoocloak-theme@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > /dev/null
           helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set-string 'theme.image.reference=REGISTRY.EXAMPLE.TEST/hoocloak-theme@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > /dev/null
+          helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set-string 'theme.image.reference=[2001:db8::1]:5000/hoocloak-theme@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > /dev/null
+          helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set-string 'theme.image.reference=registry.example.test/hoocloak-theme:stable@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > /dev/null
+          helm template hoocloak charts/hoocloak --namespace hoocloak \
             --set image.repository=registry.example.test/custom-hoocloak \
             --set image.tag=1.0.8 \
             --set hoocloakConfig.ui.theme_dir=/etc/hoocloak/theme > /dev/null
@@ -143,6 +148,23 @@ jobs:
             exit 1
           fi
           if helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set-string 'theme.image.reference=https://registry.example.test/theme@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > /dev/null 2>&1; then
+            echo "scheme-prefixed theme image reference was accepted" >&2
+            exit 1
+          fi
+          if helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set-string 'theme.image.reference=registry.example.test/theme@sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' > /dev/null 2>&1; then
+            echo "uppercase theme digest was accepted" >&2
+            exit 1
+          fi
+          for ambiguous in true null 123; do
+            if helm template hoocloak charts/hoocloak --namespace hoocloak \
+              --set "theme.image.reference=$ambiguous" > /dev/null 2>&1; then
+              echo "YAML-ambiguous theme image reference $ambiguous was accepted" >&2
+              exit 1
+            fi
+          done
+          if helm template hoocloak charts/hoocloak --namespace hoocloak \
             --set theme.existingClaim=legacy-theme > /dev/null 2>&1; then
             echo "removed PVC theme value was accepted" >&2
             exit 1
@@ -150,14 +172,13 @@ jobs:
           helm template hoocloak charts/hoocloak --namespace hoocloak \
             --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > /dev/null
           helm package charts/hoocloak --destination "$RUNNER_TEMP"
-
       - name: Smoke theme image on Kubernetes
         run: |
           set -euo pipefail
           go install "sigs.k8s.io/kind@v${KIND_VERSION}"
           docker run --detach --restart=always \
             --publish 127.0.0.1:5001:5000 \
-            --name kind-registry registry:2
+            --name kind-registry registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
           cat > "$RUNNER_TEMP/kind.yaml" <<'EOF'
           kind: Cluster
           apiVersion: kind.x-k8s.io/v1alpha4

@@ -13,13 +13,9 @@
 
 ## Unreleased
 
-### Features
+### Bug Fixes
 
-- **helm:** deliver custom themes from OCI images without persistent volumes
-
-### Breaking Changes
-
-- **helm:** replace `theme.existingClaim` PVC delivery with digest-pinned `theme.image.reference`; existing releases must migrate values and may need `helm upgrade --reset-values`
+- harden protocol resource bounds, theme isolation, configuration validation, Helm rendering, E2E isolation, and release gates
 
 ## 1.0.8 (2026-07-23)
 

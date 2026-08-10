@@ -82,15 +82,15 @@
 {{- end }}
 
 {{- define "hoocloak.labels" -}}
-helm.sh/chart: {{ include "hoocloak.chart" . }}
+helm.sh/chart: {{ include "hoocloak.chart" . | quote }}
 {{ include "hoocloak.selectorLabels" . }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 
 {{- define "hoocloak.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "hoocloak.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/name: {{ include "hoocloak.name" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end }}
 
 {{- define "hoocloak.serviceAccountName" -}}

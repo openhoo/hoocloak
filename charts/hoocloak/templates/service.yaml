@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "hoocloak.fullname" . }}
+  name: {{ include "hoocloak.fullname" . | quote }}
   labels:
     {{- include "hoocloak.labels" . | nindent 4 }}
   {{- with .Values.service.annotations }}
@@ -9,7 +9,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  type: {{ .Values.service.type }}
+  type: {{ .Values.service.type | quote }}
   ports:
     - name: http
       port: {{ .Values.service.port }}

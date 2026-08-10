@@ -34,6 +34,8 @@ var (
 	testUserHash   string
 )
 
+const testCodeChallenge = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func testConfig(t testing.TB) config.Config {
 	t.Helper()
 	testHashesOnce.Do(func() {
@@ -116,7 +118,6 @@ func realmPathAdapter(application http.Handler, basePath string) http.Handler {
 }
 
 func BenchmarkHTTPHandlers(b *testing.B) {
-	server := testServer(b, nil)
 	benchmarks := []struct {
 		name   string
 		method string
@@ -128,7 +129,7 @@ func BenchmarkHTTPHandlers(b *testing.B) {
 		{name: "DiscoveryHead", method: http.MethodHead, target: "/.well-known/openid-configuration"},
 		{
 			name: "AuthorizeGate", method: http.MethodGet,
-			target: "/authorize?client_id=react-spa&response_type=code&scope=openid+profile+api.read&redirect_uri=" + url.QueryEscape("http://app.localhost:5173/auth/callback") + "&code_challenge=benchmark-challenge&code_challenge_method=S256",
+			target: "/authorize?client_id=react-spa&response_type=code&scope=openid+profile+api.read&redirect_uri=" + url.QueryEscape("http://app.localhost:5173/auth/callback") + "&code_challenge=" + testCodeChallenge + "&code_challenge_method=S256",
 		},
 		{
 			name: "ClientCredentialsGate", method: http.MethodPost, target: "/oauth/token",
@@ -138,13 +139,23 @@ func BenchmarkHTTPHandlers(b *testing.B) {
 	}
 	for _, benchmark := range benchmarks {
 		b.Run(benchmark.name, func(b *testing.B) {
+			server := testServer(b, nil)
 			b.ReportAllocs()
+			iterations := 0
 			for b.Loop() {
 				request := httptest.NewRequest(benchmark.method, benchmark.target, strings.NewReader(benchmark.body))
 				for key, value := range benchmark.header {
 					request.Header.Set(key, value)
 				}
 				server.Handler.ServeHTTP(httptest.NewRecorder(), request)
+				iterations++
+				if benchmark.name == "AuthorizeGate" && iterations%512 == 0 {
+					b.StopTimer()
+					server.Store.mu.Lock()
+					clear(server.Store.authRequests)
+					server.Store.mu.Unlock()
+					b.StartTimer()
+				}
 			}
 		})
 	}
@@ -197,6 +208,81 @@ func TestDiscoveryAdvertisesOnlyImplementedProtocol(t *testing.T) {
 	}
 }
 
+func TestAuthorizationPreservesSpecialCharacterRedirectURI(t *testing.T) {
+	t.Parallel()
+	for _, registered := range []string{
+		"http://app.localhost:5173/auth/callback+mobile",
+		"http://app.localhost:5173/auth/callback%2Fmobile",
+	} {
+		t.Run(registered, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.Realms[0].Clients[0].RedirectURIs = []string{registered}
+			server := testServerWithConfig(t, cfg, nil)
+			alias := strings.Replace(registered, "+mobile", " mobile", 1)
+			alias = strings.Replace(alias, "%2Fmobile", "/mobile", 1)
+			aliasTarget := "/authorize?client_id=react-spa&response_type=code&scope=openid&redirect_uri=" +
+				url.QueryEscape(alias) + "&code_challenge=" + testCodeChallenge + "&code_challenge_method=S256"
+			aliasResponse := performRequest(server.Handler, http.MethodGet, aliasTarget, "", nil)
+			if aliasResponse.Code != http.StatusBadRequest {
+				t.Fatalf("alias redirect %q status = %d, want %d", alias, aliasResponse.Code, http.StatusBadRequest)
+			}
+			target := "/authorize?client_id=react-spa&response_type=code&scope=openid&redirect_uri=" +
+				url.QueryEscape(registered) + "&code_challenge=" + testCodeChallenge + "&code_challenge_method=S256"
+			authorize := performRequest(server.Handler, http.MethodGet, target, "", nil)
+			if authorize.Code != http.StatusFound {
+				t.Fatalf("authorize status = %d, want %d; location=%q body=%s", authorize.Code, http.StatusFound, authorize.Header().Get("Location"), authorize.Body.String())
+			}
+			loginURL := authorize.Header().Get("Location")
+			parsedLogin, err := url.Parse(loginURL)
+			if err != nil {
+				t.Fatalf("parse login location: %v", err)
+			}
+			authRequestID := parsedLogin.Query().Get("authRequestID")
+			if authRequestID == "" {
+				t.Fatalf("login location %q has no authRequestID", loginURL)
+			}
+			loginPath := strings.TrimPrefix(loginURL, server.basePath)
+			login := performRequest(server.Handler, http.MethodGet, loginPath, "", nil)
+			if login.Code != http.StatusOK {
+				t.Fatalf("login status = %d, want %d; body=%s", login.Code, http.StatusOK, login.Body.String())
+			}
+			cookies := login.Result().Cookies()
+			if len(cookies) != 1 {
+				t.Fatalf("login set %d cookies, want one", len(cookies))
+			}
+			form := url.Values{
+				"authRequestID": {authRequestID},
+				"csrf":          {cookies[0].Value},
+				"username":      {"alice"},
+				"password":      {"alice-password"},
+			}
+			request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.AddCookie(cookies[0])
+			response := httptest.NewRecorder()
+			server.Handler.ServeHTTP(response, request)
+			if response.Code != http.StatusSeeOther {
+				t.Fatalf("login status = %d, want %d; location=%q body=%s", response.Code, http.StatusSeeOther, response.Header().Get("Location"), response.Body.String())
+			}
+			callbackURL, err := url.Parse(response.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("parse callback location: %v", err)
+			}
+			callbackPath := strings.TrimPrefix(callbackURL.Path, server.basePath)
+			if callbackURL.RawQuery != "" {
+				callbackPath += "?" + callbackURL.RawQuery
+			}
+			callback := performRequest(server.Handler, http.MethodGet, callbackPath, "", nil)
+			if callback.Code != http.StatusFound {
+				t.Fatalf("callback status = %d, want %d; location=%q body=%s", callback.Code, http.StatusFound, callback.Header().Get("Location"), callback.Body.String())
+			}
+			if got := callback.Header().Get("Location"); !strings.HasPrefix(got, registered+"?code=") {
+				t.Fatalf("client callback location = %q, want prefix %q", got, registered+"?code=")
+			}
+		})
+	}
+}
+
 func TestApplicationOwnedProtocolGates(t *testing.T) {
 	server := testServer(t, nil)
 	authorizeBase := "/authorize?client_id=react-spa&response_type=code&scope=openid&redirect_uri=" + url.QueryEscape("http://app.localhost:5173/auth/callback")
@@ -243,13 +329,15 @@ func TestAuthorizeGateValidatesPostedParameters(t *testing.T) {
 	server := testServer(t, nil)
 	valid := url.Values{
 		"client_id": {"react-spa"}, "response_type": {"code"}, "scope": {"openid"},
-		"redirect_uri": {"http://app.localhost:5173/auth/callback"}, "code_challenge": {"value"}, "code_challenge_method": {"S256"},
+		"redirect_uri": {"http://app.localhost:5173/auth/callback"}, "code_challenge": {testCodeChallenge}, "code_challenge_method": {"S256"},
 	}
 	tests := []struct {
 		name, field, value, errorCode string
 	}{
 		{name: "missing PKCE", field: "code_challenge", errorCode: "invalid_request"},
 		{name: "plain PKCE", field: "code_challenge_method", value: "plain", errorCode: "invalid_request"},
+		{name: "short PKCE", field: "code_challenge", value: "short", errorCode: "invalid_request"},
+		{name: "invalid PKCE character", field: "code_challenge", value: strings.Repeat("a", 42) + "!", errorCode: "invalid_request"},
 		{name: "disallowed scope", field: "scope", value: "openid api.write", errorCode: "invalid_scope"},
 		{name: "response type", field: "response_type", value: "token", errorCode: "invalid_request"},
 		{name: "response mode", field: "response_mode", value: "form_post", errorCode: "invalid_request"},
@@ -284,7 +372,7 @@ func TestAuthorizeGateRejectsDuplicateSecurityParameters(t *testing.T) {
 	server := testServer(t, nil)
 	valid := url.Values{
 		"client_id": {"react-spa"}, "response_type": {"code"}, "scope": {"openid"},
-		"redirect_uri": {"http://app.localhost:5173/auth/callback"}, "code_challenge": {"value"}, "code_challenge_method": {"S256"},
+		"redirect_uri": {"http://app.localhost:5173/auth/callback"}, "code_challenge": {testCodeChallenge}, "code_challenge_method": {"S256"},
 	}
 	for _, parameter := range []string{"client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method"} {
 		t.Run("GET "+parameter, func(t *testing.T) {
@@ -1100,7 +1188,7 @@ func TestExternalLoginThemePreflightsSelectMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, contents := range map[string]string{
-		"login.html":      `<!doctype html>{{if eq .Mode "select"}}{{(index .Identities 0).MissingField}}{{end}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf">{{if eq .Mode "select"}}<select name="identity"></select>{{else}}<input name="username"><input name="password" type="password">{{end}}</form>`,
+		"login.html":      `<!doctype html>{{if eq .Mode "select"}}{{(index .Identities 0).MissingField}}{{end}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID" value="{{.RequestID}}"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if eq .Mode "select"}}<select name="identity"></select>{{else}}<input name="username"><input name="password" type="password">{{end}}</form>`,
 		"logged-out.html": `<!doctype html><title>Signed out</title>`,
 	} {
 		if err := os.WriteFile(filepath.Join(themeDir, name), []byte(contents), 0o600); err != nil {
@@ -1165,12 +1253,198 @@ func TestExternalLoginThemeAcceptsValidDualModeForms(t *testing.T) {
 	}
 }
 
+func TestProviderEndpointPolicyAndThemeAssetConfine(t *testing.T) {
+	server := testServer(t, nil)
+	for _, tt := range []struct {
+		path, method, allow string
+	}{
+		{"/authorize", http.MethodPut, "GET, POST"},
+		{"/authorize/callback", http.MethodPost, "GET"},
+		{"/oauth/token", http.MethodGet, "POST"},
+		{"/oauth/introspect", http.MethodGet, "POST"},
+		{"/revoke", http.MethodGet, "POST"},
+		{"/userinfo", http.MethodPut, "GET, POST"},
+		{"/end_session", http.MethodPut, "GET, POST"},
+		{"/keys", http.MethodPost, "GET, HEAD"},
+	} {
+		t.Run(tt.path+" "+tt.method, func(t *testing.T) {
+			response := performRequest(server.Handler, tt.method, tt.path, "", nil)
+			if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != tt.allow {
+				t.Fatalf("status=%d allow=%q, want 405/%q", response.Code, response.Header().Get("Allow"), tt.allow)
+			}
+		})
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodOptions} {
+		response := performRequest(server.Handler, method, "/device_authorization", "", nil)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s device endpoint status=%d, want 404", method, response.Code)
+		}
+	}
+	preflightRequest := httptest.NewRequest(http.MethodOptions, "/device_authorization", nil)
+	preflightRequest.Header.Set("Origin", "http://app.localhost:5173")
+	preflightRequest.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	preflightResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(preflightResponse, preflightRequest)
+	if preflightResponse.Code != http.StatusNotFound {
+		t.Fatalf("device preflight status=%d, want 404", preflightResponse.Code)
+	}
+	token := performRequest(server.Handler, http.MethodPost, "/oauth/token", "grant_type=client_credentials", map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	if token.Code != http.StatusUnauthorized {
+		t.Fatalf("token status = %d, want 401; body=%s", token.Code, token.Body.String())
+	}
+	if token.Header().Get("Cache-Control") != "no-store" || token.Header().Get("Pragma") != "no-cache" {
+		t.Fatalf("token response headers = %#v", token.Header())
+	}
+
+	themeDir := writeExternalTheme(t, `{{if eq .Mode "select"}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><select name="identity"><option value="user-id">Example User</option></select></form>{{else}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>{{end}}`)
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(themeDir, "assets", "leak.txt")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t)
+	cfg.UI.ThemeDir = themeDir
+	external := testServerWithConfig(t, cfg, nil)
+	response := performRequest(external.Handler, http.MethodGet, "/assets/leak.txt", "", nil)
+	if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), "secret outside") {
+		t.Fatalf("symlink asset response=%d body=%q, want confined 404", response.Code, response.Body.String())
+	}
+}
+
+func TestAuthorizeRejectsOversizedStateAndNonce(t *testing.T) {
+	server := testServer(t, nil)
+	base := url.Values{
+		"client_id": {"react-spa"}, "response_type": {"code"}, "scope": {"openid"},
+		"redirect_uri": {"http://app.localhost:5173/auth/callback"}, "code_challenge": {testCodeChallenge}, "code_challenge_method": {"S256"},
+	}
+	for _, field := range []string{"state", "nonce"} {
+		t.Run(field, func(t *testing.T) {
+			form := make(url.Values, len(base)+1)
+			for key, values := range base {
+				form[key] = slices.Clone(values)
+			}
+			form.Set(field, strings.Repeat("x", maxAuthorizeFieldBytes+1))
+			response := performRequest(server.Handler, http.MethodPost, "/authorize", form.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("%s status=%d, want 400", field, response.Code)
+			}
+			if len(server.Store.authRequests) != 0 {
+				t.Fatalf("%s created pending authorization state", field)
+			}
+		})
+	}
+}
+
+func TestExternalLoginThemePreflightBrowserEffectiveControls(t *testing.T) {
+	tests := []struct {
+		name, login, want string
+	}{
+		{"literal duplicate attribute", `<form method="get" method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "must not be repeated"},
+		{"form-feed duplicate attribute", `<form method="post"` + "\f" + `method="get" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "must not be repeated"},
+		{"encoded attribute name stays literal", `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input na&#x6d;e="username"><input name="password" type="password"></form>`, "username control"},
+		{"unquoted root asset", `<img src=/assets/leak.css><form method=post action="{{.BasePath}}/login"><input type=hidden name=authRequestID><input type=hidden name=csrf><input name=username><input name=password type=password></form>`, "root-relative"},
+		{"disabled password", `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password" disabled></form>`, "must not be disabled"},
+		{"disabled fieldset", `<form method="post" action="{{.BasePath}}/login"><fieldset disabled><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></fieldset></form>`, "must not be disabled"},
+		{"form action override", `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"><button type="submit" formaction="http://app.localhost:5173/steal">Continue</button></form>`, "override"},
+		{"form method override", `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"><button type="submit" formmethod="get">Continue</button></form>`, "form method"},
+		{"form encoding", `<form method="post" enctype="multipart/form-data" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "urlencoded"},
+		{"form encoding override", `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"><button type="submit" formenctype="text/plain">Continue</button></form>`, "form encoding"},
+		{"fragmented root asset", `<img src="/assets#icon"><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root asset in srcset", `<img srcset="https://app.example.test/asset.png 1x, /assets/image.png 2x"><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root video poster", `<video poster="/assets/video.png"></video><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root SVG image", `<svg><image xlink:href="/assets/logo.svg"></image></svg><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root object data", `<object data="/assets/document.html"></object><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root legacy background", `<table background="/assets/table.png"></table><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root asset with backslashes", `<img src="/assets\logo.svg"><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root login with backslashes", `<a href="/login\x">Broken login</a><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root login through dot segment", `<a href="/x/../login">Broken login</a><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root asset through encoded dot segment", `<img src="/x/%2e%2e/assets/logo.svg"><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root asset with ignored tab", `<img src="/ass&#x09;ets/logo.svg"><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root asset with leading C0 control", `<img src="&#x01;/assets/logo.svg"><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root asset with invalid percent escape", `<img src="/assets/%zz"><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"root login with invalid percent escape", `<a href="/login/%zz">Broken login</a><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "root-relative"},
+		{"nested legend remains disabled", `<form method="post" action="{{.BasePath}}/login"><fieldset disabled><div><legend><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></legend></div></fieldset></form>`, "must not be disabled"},
+		{"second legend remains disabled", `<form method="post" action="{{.BasePath}}/login"><fieldset disabled><legend>Label</legend><legend><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></legend></fieldset></form>`, "must not be disabled"},
+		{"whitespace hidden value", `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name='authRequestID' value=' {{.RequestID}} '><input type="hidden" name='csrf' value='{{.CSRF}}'><input name="username"><input name="password" type="password"></form>`, "exactly match"},
+		{"reassociated password", `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password" form="other"></form>`, "reassociation"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeExternalTheme(t, tt.login)
+			_, _, err := loadUI(dir)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("loadUI() error=%v, want %q", err, tt.want)
+			}
+		})
+	}
+	t.Run("disabled fieldset first legend exemption", func(t *testing.T) {
+		const basePath = "/realms/theme-test"
+		login := `<form method="post" enctype="application/x-www-form-urlencoded" action="` + basePath + `/login"><fieldset disabled><legend><input type="hidden" name="authRequestID" value="request-id"><input type="hidden" name="csrf" value="csrf-token"><input name="username"><input name="password" type="password"></legend></fieldset></form>`
+		if err := validateLoginHTML(login, basePath, config.LoginModePassword, "request-id", "csrf-token"); err != nil {
+			t.Fatalf("validateLoginHTML() error=%v", err)
+		}
+	})
+	for _, tt := range []struct {
+		name, requestID, csrf string
+	}{
+		{"missing request ID", "", "csrf-token"},
+		{"wrong request ID", "wrong", "csrf-token"},
+		{"missing csrf", "request-id", ""},
+		{"wrong csrf", "request-id", "wrong"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			login := `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID" value="` + tt.requestID + `"><input type="hidden" name="csrf" value="` + tt.csrf + `"><input name="username"><input name="password" type="password"></form>`
+			dir := writeExternalTheme(t, login)
+			if err := os.WriteFile(filepath.Join(dir, "login.html"), []byte(login), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := loadUI(dir)
+			if err == nil || !strings.Contains(err.Error(), "exactly match") {
+				t.Fatalf("loadUI() error=%v, want hidden-value rejection", err)
+			}
+		})
+	}
+}
+
+func TestThemePreflightUsesBrowserTokenization(t *testing.T) {
+	const basePath = "/realms/theme-test"
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "textarea text is not markup",
+			body: `<form method="post" action="` + basePath + `/login"><textarea name="username"><input type="hidden" name="authRequestID" value="request-id"><input type="hidden" name="csrf" value="csrf-token"><input name="password" type="password"></textarea></form>`,
+		},
+		{
+			name: "template controls are inert",
+			body: `<form method="post" action="` + basePath + `/login"><input name="username"><template><input type="hidden" name="authRequestID" value="request-id"><input type="hidden" name="csrf" value="csrf-token"><input name="password" type="password"></template></form>`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateLoginHTML(tt.body, basePath, config.LoginModePassword, "request-id", "csrf-token"); err == nil {
+				t.Fatal("validateLoginHTML() accepted inert required controls")
+			}
+		})
+	}
+	if err := validateRealmRelativeURLs(`<script>const example = '<img src="/assets/example.png">'</script><template><img src="/assets/template.png"></template><img src="` + basePath + `/assets/live.png">`); err != nil {
+		t.Fatalf("validateRealmRelativeURLs() rejected inert markup: %v", err)
+	}
+	if err := validateRealmRelativeURLs(`<img src="%2Fassets/relative.png"><a href="login%2Frelative">Relative</a>`); err != nil {
+		t.Fatalf("validateRealmRelativeURLs() rejected encoded relative URLs: %v", err)
+	}
+}
+
 func writeExternalTheme(t *testing.T, login string) string {
 	t.Helper()
 	themeDir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(themeDir, "assets"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	login = strings.ReplaceAll(login, `name="authRequestID"`, `name="authRequestID" value="{{.RequestID}}"`)
+	login = strings.ReplaceAll(login, `name="csrf"`, `name="csrf" value="{{.CSRF}}"`)
 	for name, contents := range map[string]string{"login.html": login, "logged-out.html": `<!doctype html><title>Signed out</title>`} {
 		if err := os.WriteFile(filepath.Join(themeDir, name), []byte(contents), 0o600); err != nil {
 			t.Fatal(err)

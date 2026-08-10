@@ -139,11 +139,16 @@ func (c Config) RealmIssuer(name string) string {
 }
 
 var realmNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+var bcryptPattern = regexp.MustCompile(`^\$2[aby]\$10\$[./A-Za-z0-9]{53}$`)
 
 func (c Config) Validate() error {
 	baseURL, err := validateAbsoluteURL(c.BaseURL, "base_url")
 	if err != nil {
 		return err
+	}
+	rawScheme, _, _ := strings.Cut(c.BaseURL, ":")
+	if rawScheme != baseURL.Scheme {
+		return fmt.Errorf("base_url scheme must use canonical lowercase spelling %q", baseURL.Scheme)
 	}
 	if baseURL.Path != "/" || baseURL.RawPath != "" || baseURL.RawQuery != "" || baseURL.Fragment != "" || !strings.HasSuffix(c.BaseURL, "/") {
 		return errors.New("base_url must be an absolute root URL ending in /")
@@ -309,10 +314,10 @@ func requireID(id, where string, ids map[string]string) error {
 }
 
 func validBcrypt(hash string) error {
-	if hash == "" {
-		return errors.New("a bcrypt hash is required")
+	if !bcryptPattern.MatchString(hash) {
+		return errors.New("must be a valid bcrypt hash")
 	}
-	if _, err := bcrypt.Cost([]byte(hash)); err != nil {
+	if cost, err := bcrypt.Cost([]byte(hash)); err != nil || cost != bcrypt.DefaultCost {
 		return errors.New("must be a valid bcrypt hash")
 	}
 	return nil
@@ -361,8 +366,21 @@ func validateAbsoluteURL(raw, kind string) (*url.URL, error) {
 		return nil, fmt.Errorf("%s must not contain wildcards or backslashes", kind)
 	}
 	u, err := url.Parse(raw)
-	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil {
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid port") {
+			return nil, fmt.Errorf("%s port must be a number from 1 to 65535", kind)
+		}
 		return nil, fmt.Errorf("%s must be an absolute URL without credentials", kind)
+	}
+	if !u.IsAbs() || u.Host == "" || u.Hostname() == "" || u.User != nil {
+		return nil, fmt.Errorf("%s must be an absolute URL without credentials", kind)
+	}
+	rawPort := u.Port()
+	if strings.HasSuffix(u.Host, ":") || rawPort != "" {
+		port, err := strconv.Atoi(rawPort)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("%s port must be a number from 1 to 65535", kind)
+		}
 	}
 	return u, nil
 }
@@ -385,6 +403,9 @@ func validateRedirect(raw string) error {
 	u, err := validateAbsoluteURL(raw, "redirect URI")
 	if err != nil {
 		return err
+	}
+	if _, err := url.QueryUnescape(u.RawQuery); err != nil {
+		return errors.New("query contains invalid percent-encoding")
 	}
 	if u.Fragment != "" {
 		return errors.New("fragments are not allowed")

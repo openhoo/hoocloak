@@ -104,7 +104,7 @@
           "additionalProperties": false,
           "required": ["reference", "pullPolicy"],
           "properties": {
-            "reference": { "type": "string", "pattern": "^$|^[^@[:space:]]+@sha256:[a-fA-F0-9]{64}$", "description": "Immutable OCI image reference; non-empty values must be pinned by SHA-256 digest." },
+            "reference": { "type": "string", "pattern": "^$|^(?:(?:(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)(?:\\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?))*|\\[[A-Fa-f0-9:]+\\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[a-f0-9]{64}$", "description": "Immutable OCI image reference; non-empty values must use a lowercase repository name and be pinned by a SHA-256 digest, with an optional informational tag." },
             "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
           }
         },

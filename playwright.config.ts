@@ -1,5 +1,14 @@
 import { randomBytes } from "node:crypto";
-import { closeSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  futimesSync,
+  renameSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -25,6 +34,10 @@ const handledSignals = [
   ["SIGQUIT", 131],
   ["SIGTERM", 143],
 ] as const;
+const allocationLockMetadataPath = `${allocationLockPath}.metadata`;
+const allocationLockWaitTimeoutMs = 30 * 60_000;
+const allocationLockHeartbeatIntervalMs = 30_000;
+const allocationLockLeaseMs = 10 * 60_000;
 
 function lockOwnerIsAlive(pid: number): boolean {
   try {
@@ -35,94 +48,207 @@ function lockOwnerIsAlive(pid: number): boolean {
   }
 }
 
-function recoverStaleAllocationLock(): boolean {
-  try {
-    const owner = JSON.parse(readFileSync(allocationLockPath, "utf8")) as { pid?: unknown };
-    if (typeof owner.pid === "number" && Number.isInteger(owner.pid) && lockOwnerIsAlive(owner.pid)) {
-      return false;
-    }
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return true;
-    }
+type AllocationLockOwner = {
+  pid: number;
+  createdAt: string;
+  ownerToken: string;
+};
 
-    // A newly-created lock can briefly be empty while its owner writes metadata.
-    try {
-      if (Date.now() - statSync(allocationLockPath).mtimeMs < 30_000) {
-        return false;
-      }
-    } catch (statError) {
-      if ((statError as NodeJS.ErrnoException).code === "ENOENT") {
-        return true;
-      }
-      throw statError;
+function allocationLockCleanupError(reason: string): Error {
+  return new Error(
+    `${reason}. The allocation lock was not removed because only its owner may unlink it. ` +
+      `After verifying that no E2E run owns it, remove it manually: rm -- ${JSON.stringify(allocationLockMetadataPath)} ${JSON.stringify(allocationLockPath)}`,
+  );
+}
+
+function readAllocationLockOwner(): AllocationLockOwner | undefined {
+  let contents: string;
+  try {
+    contents = readFileSync(allocationLockMetadataPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
     }
+    throw error;
   }
 
   try {
-    rmSync(allocationLockPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
+    const owner = JSON.parse(contents) as Partial<AllocationLockOwner>;
+    if (
+      typeof owner.pid !== "number" ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid <= 0 ||
+      typeof owner.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(owner.createdAt)) ||
+      typeof owner.ownerToken !== "string" ||
+      owner.ownerToken.length === 0
+    ) {
+      throw new Error("invalid allocation lock metadata");
     }
+    return owner as AllocationLockOwner;
+  } catch {
+    throw allocationLockCleanupError(
+      `The E2E allocation lock at ${allocationLockPath} contains malformed metadata`,
+    );
   }
-  return true;
 }
 
 async function acquireAllocationLock(): Promise<() => void> {
+  const waitDeadline = Date.now() + allocationLockWaitTimeoutMs;
   let announcedWait = false;
   while (true) {
+    const ownerToken = randomBytes(32).toString("hex");
+    let descriptor: number;
     try {
-      const descriptor = openSync(allocationLockPath, "wx", 0o600);
-      try {
-        writeFileSync(descriptor, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
-      } finally {
-        closeSync(descriptor);
+      descriptor = openSync(allocationLockPath, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
       }
-
-      let released = false;
-      const release = () => {
-        if (released) {
-          return;
+      const owner = readAllocationLockOwner();
+      let heartbeatAgeMs: number;
+      try {
+        heartbeatAgeMs = Date.now() - statSync(allocationLockPath).mtimeMs;
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === "ENOENT") {
+          if (Date.now() >= waitDeadline) {
+            throw allocationLockCleanupError(
+              `Timed out after ${allocationLockWaitTimeoutMs}ms waiting for the E2E allocation lock at ${allocationLockPath}`,
+            );
+          }
+          continue;
         }
-        released = true;
+        throw statError;
+      }
+      if (owner === undefined) {
+        if (heartbeatAgeMs >= allocationLockLeaseMs) {
+          throw allocationLockCleanupError(
+            `The E2E allocation lock at ${allocationLockPath} has incomplete metadata and no fresh heartbeat`,
+          );
+        }
+      } else if (!lockOwnerIsAlive(owner.pid) || heartbeatAgeMs >= allocationLockLeaseMs) {
+        const confirmedOwner = readAllocationLockOwner();
+        if (confirmedOwner?.ownerToken !== owner.ownerToken) {
+          if (Date.now() >= waitDeadline) {
+            throw allocationLockCleanupError(
+              `Timed out after ${allocationLockWaitTimeoutMs}ms waiting for the E2E allocation lock at ${allocationLockPath}`,
+            );
+          }
+          continue;
+        }
+        const reason = lockOwnerIsAlive(owner.pid)
+          ? `has not refreshed its heartbeat for ${Math.floor(heartbeatAgeMs / 1_000)} seconds`
+          : `belongs to dead process ${owner.pid}`;
+        throw allocationLockCleanupError(
+          `The E2E allocation lock at ${allocationLockPath} ${reason}`,
+        );
+      }
+      if (Date.now() >= waitDeadline) {
+        throw allocationLockCleanupError(
+          `Timed out after ${allocationLockWaitTimeoutMs}ms waiting for the E2E allocation lock at ${allocationLockPath}`,
+        );
+      }
+      if (!announcedWait) {
+        console.error(`Waiting for E2E allocation lock at ${allocationLockPath}`);
+        announcedWait = true;
+      }
+      await delay(100);
+      continue;
+    }
+
+    let temporaryPath: string | undefined;
+    try {
+      try {
+        rmSync(allocationLockMetadataPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+      }
+      temporaryPath = `${allocationLockMetadataPath}.${process.pid}.${ownerToken}.tmp`;
+      const metadataDescriptor = openSync(temporaryPath, "wx", 0o600);
+      try {
+        writeFileSync(
+          metadataDescriptor,
+          JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), ownerToken }),
+        );
+      } finally {
+        closeSync(metadataDescriptor);
+      }
+      renameSync(temporaryPath, allocationLockMetadataPath);
+    } catch (error) {
+      try {
+        rmSync(allocationLockPath);
+      } catch (cleanupError) {
+        if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw cleanupError;
+        }
+      }
+      throw error;
+    } finally {
+      if (temporaryPath !== undefined) {
         try {
-          rmSync(allocationLockPath);
+          rmSync(temporaryPath);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
             throw error;
           }
         }
-      };
-
-      process.once("exit", release);
-      for (const [signal, exitCode] of handledSignals) {
-        process.once(signal, () => {
-          // Playwright owns graceful webServer shutdown. This is only a bounded fallback
-          // that releases the lock if its signal handling cannot complete.
-          const forcedExit = setTimeout(() => {
-            release();
-            process.exit(exitCode);
-          }, 30_000);
-          forcedExit.unref();
-        });
-      }
-      return release;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error;
       }
     }
 
-    if (recoverStaleAllocationLock()) {
-      continue;
+    const heartbeat = setInterval(() => {
+      try {
+        if (readAllocationLockOwner()?.ownerToken !== ownerToken) {
+          clearInterval(heartbeat);
+          return;
+        }
+        const now = new Date();
+        futimesSync(descriptor, now, now);
+      } catch {
+        clearInterval(heartbeat);
+      }
+    }, allocationLockHeartbeatIntervalMs);
+    heartbeat.unref();
+
+    let released = false;
+    const release = () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      clearInterval(heartbeat);
+      try {
+        const owner = readAllocationLockOwner();
+        if (owner?.ownerToken === ownerToken) {
+          for (const path of [allocationLockMetadataPath, allocationLockPath]) {
+            try {
+              rmSync(path);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                throw error;
+              }
+            }
+          }
+        }
+      } finally {
+        closeSync(descriptor);
+      }
+    };
+
+    process.once("exit", release);
+    for (const [signal, exitCode] of handledSignals) {
+      process.once(signal, () => {
+        // Playwright owns graceful webServer shutdown. This is only a bounded fallback
+        // that releases the lock if its signal handling cannot complete.
+        const forcedExit = setTimeout(() => {
+          release();
+          process.exit(exitCode);
+        }, 30_000);
+        forcedExit.unref();
+      });
     }
-    if (!announcedWait) {
-      console.error(`Waiting for E2E allocation lock at ${allocationLockPath}`);
-      announcedWait = true;
-    }
-    await delay(100);
+    return release;
   }
 }
 

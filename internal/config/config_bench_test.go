@@ -21,7 +21,7 @@ func BenchmarkConfigValidate(b *testing.B) {
 }
 
 func benchmarkConfig(realmCount, usersPerRealm, clientsPerRealm int) Config {
-	const passwordHash = "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhme"
+	const passwordHash = "$2a$10$7EqJtq98hPqEX7fNZaFWoO5c1QUP5m6d43kYdV9He6Bpv/bVhhmeA"
 	cfg := Config{
 		BaseURL: "http://hoocloak.localhost:8080/",
 		Listen:  "127.0.0.1:8080",

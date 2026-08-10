@@ -3,6 +3,7 @@ package idp
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -163,6 +164,85 @@ func BenchmarkPruneExpiredState(b *testing.B) {
 				store.mu.Unlock()
 			}
 		})
+	}
+}
+
+func TestCreateAuthRequestCapacity(t *testing.T) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := newTestStore(t, clock)
+	request := &oidc.AuthRequest{ClientID: "react-spa"}
+
+	for index := range maxPendingAuthRequests {
+		if _, err := store.CreateAuthRequest(context.Background(), request, "alice"); err != nil {
+			t.Fatalf("CreateAuthRequest(%d) error = %v", index, err)
+		}
+	}
+	if len(store.authRequests) != maxPendingAuthRequests {
+		t.Fatalf("pending authorization requests = %d, want %d", len(store.authRequests), maxPendingAuthRequests)
+	}
+	if _, err := store.CreateAuthRequest(context.Background(), request, "alice"); err == nil {
+		t.Fatal("CreateAuthRequest accepted a request beyond capacity")
+	} else {
+		var providerErr *oidc.Error
+		if !errors.As(err, &providerErr) {
+			t.Fatalf("capacity error type = %T, want *oidc.Error", err)
+		}
+		if providerErr.ErrorType != oidc.ServerError {
+			t.Fatalf("capacity error code = %v, want %v", providerErr.ErrorType, oidc.ServerError)
+		}
+		if providerErr.Description != "too many pending authorization requests" {
+			t.Fatalf("capacity error description = %q", providerErr.Description)
+		}
+	}
+	if len(store.authRequests) != maxPendingAuthRequests {
+		t.Fatalf("pending authorization requests grew after rejection: %d", len(store.authRequests))
+	}
+}
+
+func TestCreateAuthRequestCapacityFreesOnExpiryAndDeletion(t *testing.T) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := newTestStore(t, clock)
+	request := &oidc.AuthRequest{ClientID: "react-spa"}
+
+	for index := range maxPendingAuthRequests {
+		if _, err := store.CreateAuthRequest(context.Background(), request, "alice"); err != nil {
+			t.Fatalf("CreateAuthRequest(%d) error = %v", index, err)
+		}
+	}
+	clock.Advance(5 * time.Minute)
+	if _, err := store.CreateAuthRequest(context.Background(), request, "alice"); err != nil {
+		t.Fatalf("CreateAuthRequest after expiry error = %v", err)
+	}
+	if len(store.authRequests) != 1 {
+		t.Fatalf("pending authorization requests after expiry = %d, want 1", len(store.authRequests))
+	}
+
+	store = newTestStore(t, clock)
+	for index := range maxPendingAuthRequests {
+		if _, err := store.CreateAuthRequest(context.Background(), request, "alice"); err != nil {
+			t.Fatalf("CreateAuthRequest(%d) after reset error = %v", index, err)
+		}
+	}
+	var requestID string
+	for id := range store.authRequests {
+		requestID = id
+		break
+	}
+	store.mu.Lock()
+	auth := store.authRequests[requestID]
+	auth.done = true
+	auth.code = "deletable-code"
+	auth.codeSaved = true
+	store.codes[auth.code] = codeRecord{requestID: requestID, expires: auth.expires, reserved: true}
+	store.mu.Unlock()
+	if err := store.DeleteAuthRequest(context.Background(), requestID); err != nil {
+		t.Fatalf("DeleteAuthRequest() error = %v", err)
+	}
+	if _, err := store.CreateAuthRequest(context.Background(), request, "alice"); err != nil {
+		t.Fatalf("CreateAuthRequest after deletion error = %v", err)
+	}
+	if len(store.authRequests) != maxPendingAuthRequests {
+		t.Fatalf("pending authorization requests after deletion = %d, want %d", len(store.authRequests), maxPendingAuthRequests)
 	}
 }
 
