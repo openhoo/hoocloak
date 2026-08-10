@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 2.0.1 (2026-08-10)
+
+### Bug Fixes
+
+- harden protocol and release boundaries (c9d161c)
+
 ## 2.0.0 (2026-07-23)
 
 ### Other Changes
