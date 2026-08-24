@@ -133,7 +133,7 @@ printf '%s\n' 'a-local-secret' | ./hoocloak hash
 | `users[].id` | yes | Stable subject identifier; shares a per-realm namespace with client IDs. |
 | `users[].username` | yes | Password-login name; unique per realm after Unicode case folding. |
 | `users[].password_hash` | yes | Valid bcrypt hash, including when process-wide select mode is used. |
-| `users[].name`, `email`, `email_verified` | no | Optional profile values. With the corresponding scope, omitted strings produce empty claim values and omitted `email_verified` produces `false`. |
+| `users[].name`, `email`, `email_verified` | no | Optional profile values. With the corresponding scope, empty or omitted `name`/`email` and false or omitted `email_verified` are left out of serialized UserInfo and ID-token claims; only non-zero configured values are emitted. |
 | `users[].roles`, `permissions` | no | Optional unique authorization values; absent or empty is valid. Permissions are custom OAuth scope tokens, never reserved OIDC scopes. |
 | `clients[].id`, `type` | yes | Stable client ID and either `spa` or `service`; ID shares the realm namespace with user IDs. |
 | `clients[].name` | no | Display name used by the hosted login page; ID is the fallback. |
@@ -211,7 +211,7 @@ Every endpoint below is relative to `/realms/{realm}` unless marked root-only.
 | Endpoint | Methods | Authentication and purpose |
 |---|---|---|
 | `/.well-known/openid-configuration` | GET, HEAD | Public discovery document. |
-| `/keys` | GET | Public realm JWKS. |
+| `/keys` | GET, HEAD | Public realm JWKS. |
 | `/authorize` | GET, POST | Public SPA authorization entry; registered client/redirect, `response_type=code`, query response mode, `openid`, and S256 PKCE are mandatory. |
 | `/oauth/token` | POST | SPA authorization-code/refresh requests use the public client; service `client_credentials` requires HTTP Basic and rejects credentials in form/query fields. |
 | `/userinfo` | GET, POST | Bearer access token. If an `Origin` is sent, it must exactly match the owning SPA client's configured origins. |
@@ -231,7 +231,7 @@ Token, introspection, and revocation endpoints are POST-only. Security-sensitive
 - A SPA may request only its allow-listed scopes. Reserved scopes are granted as requested; each custom application scope is granted only when the selected user's `permissions` also contains it.
 - A service must request a nonempty subset present in both its `allowed_scopes` and `permissions`.
 - The `permission` claim is the granted custom-scope list. `role` comes from the user for human tokens and from the client for service tokens. Access tokens include `client_id` and the space-delimited `scope`; human tokens also carry `name` and `preferred_username`. Service tokens do not receive human profile claims.
-- `profile` controls standard `name`/`preferred_username` userinfo and ID-token profile disclosure; `email` controls `email`/`email_verified`. Userinfo always includes `sub` for an active matching token.
+- `profile` controls standard `name`/`preferred_username` userinfo and ID-token profile disclosure; `email` controls `email`/`email_verified`. Userinfo includes `sub` only for an active matching human access token; service access tokens are not accepted by `/userinfo`.
 - `offline_access` enables the SPA refresh flow; it does not make access JWTs opaque or remotely retractable.
 - Discovery's `claims_supported` is the standard OIDC claim advertisement. It does not enumerate every Hoocloak private access-token authorization claim such as `client_id`, `scope`, `role`, or `permission`.
 
@@ -310,7 +310,7 @@ The root Compose stack is the turnkey path. The source example in [`examples/asp
 }
 ```
 
-Local HTTP is accepted only when `ASPNETCORE_ENVIRONMENT=Development` and the authority/origin host is loopback, `localhost`, or `.localhost`. Authority must be an absolute credential-free URL whose path is exactly `/realms/<valid-realm>` and has no query/fragment. CORS origin must be an exact HTTP(S) origin without credentials, path, query, or fragment. Other environments require HTTPS.
+Local HTTP is accepted only when `ASPNETCORE_ENVIRONMENT=Development` and the authority/origin host is loopback, `localhost`, or `.localhost`. Authority must be an absolute credential-free URL whose path is `/realms/<valid-realm>` optionally followed by a single trailing slash (normalized away before use) and has no query/fragment. CORS origin must be an exact HTTP(S) origin without credentials, path, query, or fragment. Other environments require HTTPS.
 
 The JWT handler validates issuer, audience, signing key, lifetime, RS256, and a 30-second clock skew. Its additional access-token shape gate requires nonempty `jti` and `scope` and rejects `azp`, preventing ID tokens from being accepted as API access tokens.
 

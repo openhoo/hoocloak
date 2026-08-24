@@ -21,7 +21,17 @@
 
 ### Bug Fixes
 
-- harden protocol resource bounds, theme isolation, configuration validation, Helm rendering, E2E isolation, and release gates
+- bind authorization completion to the authenticating browser
+- harden theme preflight validation, login-form parsing, CSP construction, authorization storage checks, and configuration validation
+- make React example token renewal single-flight under StrictMode and keep sign-out pending until provider-side termination completes
+- require an exact audience match in the ASP.NET example
+- **helm:** tighten chart value schema validation
+- stabilize CI browser smoke scheduling and workflow concurrency
+
+### Documentation
+
+- align protocol reference and integration notes with implementation: JWKS `GET, HEAD` support, human-only `/userinfo` subjects, omitted empty profile claims, and the accepted ASP.NET authority trailing slash
+- remove release hardening already shipped in 2.0.1 from this section
 
 ## 1.0.8 (2026-07-23)
 

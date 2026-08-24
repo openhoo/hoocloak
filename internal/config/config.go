@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/net/idna"
 	"golang.org/x/text/cases"
 )
 
@@ -139,7 +141,14 @@ func (c Config) RealmIssuer(name string) string {
 }
 
 var realmNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-var bcryptPattern = regexp.MustCompile(`^\$2[aby]\$10\$[./A-Za-z0-9]{53}$`)
+
+// The final salt and checksum characters encode surplus bits, so canonical
+// bcrypt serializations constrain them: the 22nd character (salt padding)
+// can only be ., O, e, or u, and the 53rd character (checksum padding) can
+// only be one of .CGKOSWaeimquy26. CompareHashAndPassword regenerates the
+// canonical checksum, so hashes violating this pass startup but can never
+// authenticate.
+var bcryptPattern = regexp.MustCompile(`^\$2[aby]\$10\$[./A-Za-z0-9]{21}[.Oeu][./A-Za-z0-9]{30}[.CGKOSWaeimquy26]$`)
 
 func (c Config) Validate() error {
 	baseURL, err := validateAbsoluteURL(c.BaseURL, "base_url")
@@ -407,7 +416,7 @@ func validateRedirect(raw string) error {
 	if _, err := url.QueryUnescape(u.RawQuery); err != nil {
 		return errors.New("query contains invalid percent-encoding")
 	}
-	if u.Fragment != "" {
+	if _, _, found := strings.Cut(raw, "#"); found {
 		return errors.New("fragments are not allowed")
 	}
 	return validateScheme(u, "redirect URI")
@@ -423,10 +432,9 @@ func validateOrigin(raw string) error {
 	}
 
 	scheme := strings.ToLower(u.Scheme)
-	host := strings.ToLower(strings.TrimRight(u.Hostname(), "."))
-	authority := host
-	if strings.Contains(host, ":") {
-		authority = "[" + host + "]"
+	authority, err := canonicalOriginHost(u.Hostname())
+	if err != nil {
+		return err
 	}
 	if rawPort := u.Port(); rawPort != "" {
 		port, err := strconv.Atoi(rawPort)
@@ -442,6 +450,214 @@ func validateOrigin(raw string) error {
 		return fmt.Errorf("must use canonical form %q", canonical)
 	}
 	return validateScheme(u, "origin")
+}
+
+// canonicalOriginHost returns an origin host exactly as browsers serialize it
+// in an Origin header: ASCII-lowercase, no trailing root dot, punycode for
+// internationalized names, and canonical IPv4/IPv6 literals. Rejecting raw
+// values that differ from their canonical form keeps the configured origins
+// identical to the wire values later matched exactly during userinfo and
+// storage origin checks.
+func canonicalOriginHost(hostname string) (string, error) {
+	if strings.Contains(hostname, ":") {
+		return canonicalIPv6Host(hostname)
+	}
+	host, err := canonicalDomainHost(hostname)
+	if err != nil {
+		return "", err
+	}
+	if endsInIPv4Number(host) {
+		address, err := parseBrowserIPv4Host(host)
+		if err != nil {
+			return "", errors.New("host is not a valid IPv4 address")
+		}
+		return address.String(), nil
+	}
+	return host, nil
+}
+
+// canonicalDomainHost lowercases and strips trailing root dots; hosts
+// containing non-ASCII bytes are converted with IDNA the way browsers do, so
+// they must be supplied in their punycode form to survive the canonical-form
+// comparison.
+func canonicalDomainHost(hostname string) (string, error) {
+	ascii := true
+	for index := range len(hostname) {
+		if hostname[index] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if !ascii {
+		converted, err := idna.Lookup.ToASCII(hostname)
+		if err != nil {
+			return "", errors.New("host must be provided in punycode form")
+		}
+		hostname = converted
+	}
+	host := strings.ToLower(strings.TrimRight(hostname, "."))
+	if host == "" {
+		return "", errors.New("host must not be empty")
+	}
+	return host, nil
+}
+
+func canonicalIPv6Host(literal string) (string, error) {
+	if strings.ContainsRune(literal, '%') {
+		return "", errors.New("host must not contain an IPv6 zone identifier")
+	}
+	address, err := netip.ParseAddr(literal)
+	if err != nil || !address.Is6() || address.Is4() {
+		return "", errors.New("host is not a valid IPv6 address")
+	}
+	return "[" + serializeIPv6(address) + "]", nil
+}
+
+// serializeIPv6 formats an address following the WHATWG URL IPv6 serializer:
+// the longest run of at least two zero pieces is compressed, and IPv4-mapped
+// tails stay hexadecimal so output always matches browser Origin headers.
+func serializeIPv6(address netip.Addr) string {
+	bytes := address.As16()
+	var pieces [8]uint16
+	for index := range pieces {
+		pieces[index] = uint16(bytes[2*index])<<8 | uint16(bytes[2*index+1])
+	}
+	bestIndex, bestLength, currentIndex, currentLength := -1, 1, -1, 0
+	for index := range pieces {
+		if pieces[index] != 0 {
+			if currentLength > bestLength {
+				bestIndex, bestLength = currentIndex, currentLength
+			}
+			currentIndex, currentLength = -1, 0
+			continue
+		}
+		if currentIndex < 0 {
+			currentIndex = index
+		}
+		currentLength++
+	}
+	if currentLength > bestLength {
+		bestIndex, bestLength = currentIndex, currentLength
+	}
+	var builder strings.Builder
+	for index := 0; index < len(pieces); index++ {
+		if index == bestIndex {
+			if index == 0 {
+				builder.WriteByte(':')
+			}
+			builder.WriteByte(':')
+			index += bestLength - 1
+			continue
+		}
+		builder.WriteString(strconv.FormatUint(uint64(pieces[index]), 16))
+		if index != 7 {
+			builder.WriteByte(':')
+		}
+	}
+	return builder.String()
+}
+
+// endsInIPv4Number reports whether a host ends in a decimal or 0x-hex label.
+// Browsers parse such hosts as IPv4 addresses, so spellings like 2130706433
+// or 1.2.03 never appear verbatim in Origin headers.
+func endsInIPv4Number(host string) bool {
+	parts := strings.Split(host, ".")
+	last := parts[len(parts)-1]
+	if last == "" {
+		return false
+	}
+	if isRadixDigits(last, 10) {
+		return true
+	}
+	return len(last) >= 2 && last[0] == '0' && last[1]|0x20 == 'x' &&
+		(len(last) == 2 || isRadixDigits(last[2:], 16))
+}
+
+// parseBrowserIPv4Host implements the WHATWG URL IPv4 parser, including its
+// deprecated hex and octal label radices and left-padding of partial
+// addresses, and returns the canonical dotted-decimal form.
+func parseBrowserIPv4Host(host string) (netip.Addr, error) {
+	parts := strings.Split(host, ".")
+	if len(parts) > 4 {
+		return netip.Addr{}, errors.New("invalid IPv4 address")
+	}
+	var numbers [4]uint64
+	for index, part := range parts {
+		value, err := parseBrowserIPv4Number(part)
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		if index < len(parts)-1 && value > 255 {
+			return netip.Addr{}, errors.New("invalid IPv4 address")
+		}
+		numbers[index] = value
+	}
+	if limit := uint64(1) << (8 * (5 - len(parts))); numbers[len(parts)-1] >= limit {
+		return netip.Addr{}, errors.New("invalid IPv4 address")
+	}
+	var value uint64
+	for index := range len(parts) {
+		if index == len(parts)-1 {
+			value += numbers[index]
+			break
+		}
+		value += numbers[index] << (8 * (3 - index))
+	}
+	var quad [4]byte
+	quad[0], quad[1], quad[2], quad[3] = byte(value>>24), byte(value>>16), byte(value>>8), byte(value)
+	return netip.AddrFrom4(quad), nil
+}
+
+func parseBrowserIPv4Number(part string) (uint64, error) {
+	if part == "" {
+		return 0, errors.New("invalid IPv4 address")
+	}
+	base, digits := 10, part
+	switch {
+	case len(part) >= 2 && part[0] == '0' && part[1]|0x20 == 'x':
+		base, digits = 16, part[2:]
+	case len(part) >= 2 && part[0] == '0':
+		base, digits = 8, part[1:]
+	}
+	var value uint64
+	for index := range len(digits) {
+		digit := digits[index]
+		switch {
+		case digit >= '0' && digit <= '9':
+			digit -= '0'
+		case digit >= 'a' && digit <= 'f' && base == 16:
+			digit -= 'a' - 10
+		case digit >= 'A' && digit <= 'F' && base == 16:
+			digit -= 'A' - 10
+		default:
+			return 0, errors.New("invalid IPv4 address")
+		}
+		if int(digit) >= base {
+			return 0, errors.New("invalid IPv4 address")
+		}
+		value = value*uint64(base) + uint64(digit)
+		if value > 0xFFFFFFFF {
+			return 0, errors.New("invalid IPv4 address")
+		}
+	}
+	return value, nil
+}
+
+func isRadixDigits(value string, base int) bool {
+	if value == "" {
+		return false
+	}
+	for index := range len(value) {
+		digit := value[index]
+		switch {
+		case digit >= '0' && digit <= '9':
+		case base == 16 && digit >= 'a' && digit <= 'f':
+		case base == 16 && digit >= 'A' && digit <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func IsLocalHost(host string) bool {

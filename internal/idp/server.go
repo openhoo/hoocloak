@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"github.com/zitadel/oidc/v3/pkg/op"
 	xhtml "golang.org/x/net/html"
+	"golang.org/x/net/idna"
 	"golang.org/x/text/language"
 
 	"github.com/openhoo/hoocloak/internal/config"
@@ -141,7 +143,11 @@ func NewServer(cfg config.Config, keys map[string]SigningKey, logger *slog.Logge
 		for _, user := range realm.Users {
 			identities = append(identities, loginIdentity{ID: user.ID, Username: user.Username, Name: user.Name, Email: user.Email})
 		}
-		formActions := append([]string{"'self'"}, configuredRedirectOrigins(realm)...)
+		formOrigins, err := configuredRedirectOrigins(realm)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize redirect origins for realm %q: %w", realm.Name, err)
+		}
+		formActions := append([]string{"'self'"}, formOrigins...)
 		realmRuntime := &realmServer{
 			Provider: provider, Store: store, loginMode: cfg.LoginMode,
 			issuer: issuer, basePath: basePath, secureCookies: strings.HasPrefix(issuer, "https://"),
@@ -284,52 +290,199 @@ type loginFieldsetValidation struct {
 	firstLegendOpen bool
 	legendDepth     int
 }
+type htmlNS uint8
+
+const (
+	nsHTML htmlNS = iota
+	nsSVG
+	nsMath
+)
+
+type htmlElementFrame struct {
+	name           string
+	namespace      htmlNS
+	integratesHTML bool
+}
+
+type browserHTMLWalker struct {
+	tokenizer *xhtml.Tokenizer
+	stack     []htmlElementFrame
+}
+
+func newBrowserHTMLWalker(document string) *browserHTMLWalker {
+	return &browserHTMLWalker{tokenizer: xhtml.NewTokenizer(strings.NewReader(document))}
+}
+
+func (w *browserHTMLWalker) currentNamespace() htmlNS {
+	if len(w.stack) == 0 || w.stack[len(w.stack)-1].integratesHTML {
+		return nsHTML
+	}
+	return w.stack[len(w.stack)-1].namespace
+}
+
+func (w *browserHTMLWalker) truncateForeign() {
+	w.stack = nil
+}
+
+func foreignBreakoutElement(name string, attributes map[string]string) bool {
+	switch name {
+	case "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed",
+		"form", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta",
+		"nobr", "ol", "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table", "tt",
+		"u", "ul", "var":
+		return true
+	case "font":
+		_, color := attributes["color"]
+		_, face := attributes["face"]
+		_, size := attributes["size"]
+		return color || face || size
+	default:
+		return false
+	}
+}
+
+func foreignIntegrationPoint(namespace htmlNS, name string, attributes map[string]string) bool {
+	switch namespace {
+	case nsSVG:
+		return name == "foreignobject" || name == "desc" || name == "title"
+	case nsMath:
+		if name == "mi" || name == "mo" || name == "mn" || name == "ms" || name == "mtext" {
+			return true
+		}
+		encoding := strings.ToLower(attributes["encoding"])
+		return name == "annotation-xml" && (encoding == "text/html" || encoding == "application/xhtml+xml")
+	default:
+		return false
+	}
+}
+
+func foreignRawTextElement(name string) bool {
+	switch name {
+	case "title", "textarea", "style", "script", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext":
+		return true
+	default:
+		return false
+	}
+}
+
+func (w *browserHTMLWalker) close(name string) {
+	for index := len(w.stack) - 1; index >= 0; index-- {
+		if w.stack[index].name == name {
+			w.stack = w.stack[:index]
+			return
+		}
+	}
+}
+
+func (w *browserHTMLWalker) next() (xhtml.TokenType, string, map[string]string, error) {
+	tokenType := w.tokenizer.Next()
+	if tokenType == xhtml.ErrorToken {
+		return tokenType, "", nil, w.tokenizer.Err()
+	}
+	if tokenType != xhtml.StartTagToken && tokenType != xhtml.SelfClosingTagToken && tokenType != xhtml.EndTagToken {
+		return tokenType, "", nil, nil
+	}
+	closing := tokenType == xhtml.EndTagToken
+	name, attributes, err := validatedHTMLTag(w.tokenizer, closing)
+	if err != nil {
+		return tokenType, "", nil, err
+	}
+	if closing {
+		w.close(name)
+		return tokenType, name, nil, nil
+	}
+	namespace := w.currentNamespace()
+	if namespace != nsHTML && foreignBreakoutElement(name, attributes) {
+		w.truncateForeign()
+		namespace = nsHTML
+	}
+	foreign := namespace != nsHTML
+	if tokenType != xhtml.SelfClosingTagToken {
+		switch namespace {
+		case nsHTML:
+			if name == "svg" {
+				w.stack = append(w.stack, htmlElementFrame{name: name, namespace: nsSVG})
+			} else if name == "math" {
+				w.stack = append(w.stack, htmlElementFrame{name: name, namespace: nsMath})
+			}
+		case nsSVG, nsMath:
+			w.stack = append(w.stack, htmlElementFrame{name: name, namespace: namespace, integratesHTML: foreignIntegrationPoint(namespace, name, attributes)})
+		}
+	}
+	if foreign && foreignRawTextElement(name) {
+		w.tokenizer.NextIsNotRawText()
+	}
+	return tokenType, name, attributes, nil
+}
+
+type loginFormRecord struct {
+	id   string
+	post bool
+}
+
+type loginSubmitOverride struct {
+	kind, inputType, formID  string
+	owner                    int
+	action, method, encoding bool
+}
+
+type loginFormScope struct {
+	inPost   bool
+	postForm int
+	forms    []int
+	inert    bool
+}
 
 type loginFormValidation struct {
 	postForms    int
-	inPost       bool
+	postForm     int
 	action       string
 	controls     map[string]loginControlValidation
 	controlCount map[string]int
 	fieldsets    []loginFieldsetValidation
 	elements     []string
+	forms        []loginFormRecord
+	formIDs      map[string]int
+	overrides    []loginSubmitOverride
 }
 
 func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
-	validation := loginFormValidation{controls: make(map[string]loginControlValidation), controlCount: make(map[string]int)}
-	tokenizer := xhtml.NewTokenizer(strings.NewReader(document))
-	templateDepth := 0
+	validation := loginFormValidation{
+		postForm: -1, controls: make(map[string]loginControlValidation),
+		controlCount: make(map[string]int), formIDs: make(map[string]int),
+	}
+	walker := newBrowserHTMLWalker(document)
+	scopes := []loginFormScope{{postForm: -1}}
 	for {
-		tokenType := tokenizer.Next()
+		tokenType, name, attributes, err := walker.next()
 		if tokenType == xhtml.ErrorToken {
-			if err := tokenizer.Err(); err != nil && !errors.Is(err, io.EOF) {
+			if err != nil && !errors.Is(err, io.EOF) {
 				return fmt.Errorf("parse rendered HTML: %w", err)
 			}
 			break
+		}
+		if err != nil {
+			return fmt.Errorf("parse rendered HTML: %w", err)
 		}
 		if tokenType != xhtml.StartTagToken && tokenType != xhtml.SelfClosingTagToken && tokenType != xhtml.EndTagToken {
 			continue
 		}
 		closing := tokenType == xhtml.EndTagToken
-		name, attributes, err := validatedHTMLTag(tokenizer, closing)
-		if err != nil {
-			return fmt.Errorf("parse rendered HTML: %w", err)
-		}
-
 		if name == "template" {
 			if closing {
-				if templateDepth > 0 {
-					templateDepth--
+				if len(scopes) > 1 {
+					scopes = scopes[:len(scopes)-1]
 				}
-			} else {
-				templateDepth++
+			} else if tokenType != xhtml.SelfClosingTagToken {
+				inert := scopes[len(scopes)-1].inert || (strings.ToLower(attributes["shadowrootmode"]) != "open" && strings.ToLower(attributes["shadowrootmode"]) != "closed")
+				scopes = append(scopes, loginFormScope{postForm: -1, inert: inert})
 			}
 			continue
 		}
-		if templateDepth > 0 {
+		scope := &scopes[len(scopes)-1]
+		if scope.inert {
 			continue
 		}
-
 		if closing {
 			match := -1
 			for index := len(validation.elements) - 1; index >= 0; index-- {
@@ -353,12 +506,17 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 					validation.fieldsets = validation.fieldsets[:len(validation.fieldsets)-1]
 				}
 			}
-			if name == "form" {
-				validation.inPost = false
+			if name == "form" && len(scope.forms) > 0 {
+				scope.forms = scope.forms[:len(scope.forms)-1]
+				scope.postForm = -1
+				scope.inPost = false
+			}
+			if scope.postForm >= 0 && len(scope.forms) == 0 {
+				scope.postForm = -1
+				scope.inPost = false
 			}
 			continue
 		}
-
 		if name == "legend" && len(validation.elements) > 0 && validation.elements[len(validation.elements)-1] == "fieldset" {
 			fieldsetDepth := len(validation.elements) - 1
 			for index := len(validation.fieldsets) - 1; index >= 0; index-- {
@@ -375,23 +533,32 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 		}
 		if name == "fieldset" {
 			_, disabled := attributes["disabled"]
-			validation.fieldsets = append(validation.fieldsets, loginFieldsetValidation{
-				depth: len(validation.elements), disabled: disabled, legendDepth: -1,
-			})
+			validation.fieldsets = append(validation.fieldsets, loginFieldsetValidation{depth: len(validation.elements), disabled: disabled, legendDepth: -1})
 		}
 		if name == "form" {
-			if validation.inPost {
+			if len(scope.forms) > 0 {
 				return errors.New("nested forms are not allowed")
 			}
 			if enctype := attributes["enctype"]; strings.EqualFold(enctype, "multipart/form-data") || strings.EqualFold(enctype, "text/plain") {
 				return errors.New("login form must use application/x-www-form-urlencoded encoding")
 			}
-			if strings.EqualFold(attributes["method"], http.MethodPost) {
+			formIndex := len(validation.forms)
+			formID := attributes["id"]
+			validation.forms = append(validation.forms, loginFormRecord{id: formID, post: strings.EqualFold(attributes["method"], http.MethodPost)})
+			if formID != "" {
+				if _, exists := validation.formIDs[formID]; !exists {
+					validation.formIDs[formID] = formIndex
+				}
+			}
+			scope.forms = append(scope.forms, formIndex)
+			if validation.forms[formIndex].post {
 				validation.postForms++
 				if validation.postForms > 1 {
 					return errors.New("login page must contain exactly one POST form")
 				}
-				validation.inPost = true
+				scope.inPost = true
+				scope.postForm = formIndex
+				validation.postForm = formIndex
 				validation.action = attributes["action"]
 				validation.controls = make(map[string]loginControlValidation)
 				validation.controlCount = make(map[string]int)
@@ -404,15 +571,19 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 				strings.EqualFold(controlName, "identity") ||
 				strings.EqualFold(controlName, "username") ||
 				strings.EqualFold(controlName, "password")
+			owner := -1
+			if len(scope.forms) > 0 {
+				owner = scope.forms[len(scope.forms)-1]
+			}
 			if name == "input" || name == "button" {
-				if _, exists := attributes["formaction"]; exists {
-					return errors.New("login controls must not override the form action")
-				}
-				if _, exists := attributes["formmethod"]; exists {
-					return errors.New("login controls must not override the form method")
-				}
-				if _, exists := attributes["formenctype"]; exists {
-					return errors.New("login controls must not override the form encoding")
+				_, action := attributes["formaction"]
+				_, method := attributes["formmethod"]
+				_, encoding := attributes["formenctype"]
+				if action || method || encoding {
+					validation.overrides = append(validation.overrides, loginSubmitOverride{
+						kind: name, inputType: strings.ToLower(attributes["type"]), formID: attributes["form"],
+						owner: owner, action: action, method: method, encoding: encoding,
+					})
 				}
 			}
 			if sensitive {
@@ -430,7 +601,7 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 					return fmt.Errorf("login form %s control must not use form reassociation", controlName)
 				}
 			}
-			if validation.inPost && controlName != "" {
+			if scope.inPost && controlName != "" {
 				if sensitive {
 					for existing := range validation.controls {
 						if strings.EqualFold(existing, controlName) {
@@ -440,13 +611,34 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 					}
 					validation.controlCount[controlName]++
 				}
-				validation.controls[controlName] = loginControlValidation{
-					kind: strings.ToLower(attributes["type"]), value: attributes["value"],
-				}
+				validation.controls[controlName] = loginControlValidation{kind: strings.ToLower(attributes["type"]), value: attributes["value"]}
 			}
 		}
 		if !isVoidHTMLElement(name) {
 			validation.elements = append(validation.elements, name)
+		}
+	}
+	for _, override := range validation.overrides {
+		owner := override.owner
+		if override.formID != "" {
+			var ok bool
+			owner, ok = validation.formIDs[override.formID]
+			if !ok {
+				continue
+			}
+		}
+		submitter := (override.kind == "button" && override.inputType != "button" && override.inputType != "reset") ||
+			(override.kind == "input" && (override.inputType == "submit" || override.inputType == "image"))
+		if !submitter || owner != validation.postForm {
+			continue
+		}
+		switch {
+		case override.action:
+			return errors.New("login controls must not override the form action")
+		case override.method:
+			return errors.New("login controls must not override the form method")
+		default:
+			return errors.New("login controls must not override the form encoding")
 		}
 	}
 	if validation.postForms != 1 {
@@ -569,46 +761,44 @@ func isVoidHTMLElement(name string) bool {
 }
 
 func validateRealmRelativeURLs(document string) error {
-	tokenizer := xhtml.NewTokenizer(strings.NewReader(document))
-	templateDepth := 0
+	walker := newBrowserHTMLWalker(document)
+	scopes := []bool{false}
 	for {
-		tokenType := tokenizer.Next()
+		tokenType, name, attributes, err := walker.next()
 		if tokenType == xhtml.ErrorToken {
-			if err := tokenizer.Err(); err != nil && !errors.Is(err, io.EOF) {
+			if err != nil && !errors.Is(err, io.EOF) {
 				return fmt.Errorf("parse rendered HTML: %w", err)
 			}
 			return nil
 		}
-		if tokenType != xhtml.StartTagToken && tokenType != xhtml.SelfClosingTagToken && tokenType != xhtml.EndTagToken {
-			continue
-		}
-		closing := tokenType == xhtml.EndTagToken
-		name, attributes, err := validatedHTMLTag(tokenizer, closing)
 		if err != nil {
 			return fmt.Errorf("parse rendered HTML: %w", err)
 		}
+		if tokenType != xhtml.StartTagToken && tokenType != xhtml.SelfClosingTagToken && tokenType != xhtml.EndTagToken {
+			continue
+		}
 		if name == "template" {
 			if tokenType == xhtml.EndTagToken {
-				if templateDepth > 0 {
-					templateDepth--
+				if len(scopes) > 1 {
+					scopes = scopes[:len(scopes)-1]
 				}
-			} else {
-				templateDepth++
+			} else if tokenType != xhtml.SelfClosingTagToken {
+				inert := scopes[len(scopes)-1] || (strings.ToLower(attributes["shadowrootmode"]) != "open" && strings.ToLower(attributes["shadowrootmode"]) != "closed")
+				scopes = append(scopes, inert)
 			}
 			continue
 		}
-		if templateDepth > 0 || closing {
+		if scopes[len(scopes)-1] || tokenType == xhtml.EndTagToken {
 			continue
 		}
-		for _, name := range []string{"action", "background", "data", "formaction", "href", "poster", "src", "xlink:href"} {
-			if isRootRelativeLoginURL(attributes[name]) {
+		for _, attribute := range []string{"action", "background", "data", "formaction", "href", "poster", "src", "xlink:href"} {
+			if isRootRelativeLoginURL(attributes[attribute]) {
 				return errors.New("root-relative login and asset URLs are not allowed; use .BasePath")
 			}
 		}
 		for _, sourceSet := range []string{attributes["imagesrcset"], attributes["srcset"]} {
-			for _, candidate := range strings.Split(sourceSet, ",") {
-				fields := strings.Fields(candidate)
-				if len(fields) > 0 && isRootRelativeLoginURL(fields[0]) {
+			for _, candidate := range srcsetCandidates(sourceSet) {
+				if isRootRelativeLoginURL(candidate) {
 					return errors.New("root-relative login and asset URLs are not allowed; use .BasePath")
 				}
 			}
@@ -623,6 +813,37 @@ func validateRealmRelativeURLs(document string) error {
 	}
 }
 
+func srcsetCandidates(value string) []string {
+	var candidates []string
+	for position := 0; position < len(value); {
+		for position < len(value) && (value[position] == ',' || value[position] == ' ' || value[position] == '\t' || value[position] == '\r' || value[position] == '\n' || value[position] == '\f') {
+			position++
+		}
+		if position >= len(value) {
+			break
+		}
+		start := position
+		for position < len(value) && value[position] != ' ' && value[position] != '\t' && value[position] != '\r' && value[position] != '\n' && value[position] != '\f' {
+			position++
+		}
+		urlValue := value[start:position]
+		if strings.HasSuffix(urlValue, ",") {
+			urlValue = strings.TrimRight(urlValue, ",")
+		}
+		if urlValue != "" {
+			candidates = append(candidates, urlValue)
+		}
+		// A descriptor is separated by whitespace; consume it through the next
+		// comma while retaining only the URL candidate above.
+		for position < len(value) && value[position] != ',' {
+			position++
+		}
+		if position < len(value) {
+			position++
+		}
+	}
+	return candidates
+}
 func isRootRelativeLoginURL(value string) bool {
 	candidate := strings.Map(func(character rune) rune {
 		switch character {
@@ -737,6 +958,10 @@ func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 			if !s.authorizeGate(w, r) {
 				return
 			}
+		case "/authorize/callback":
+			if !s.callbackGate(w, r) {
+				return
+			}
 		case "/oauth/token":
 			if !s.tokenGate(w, r) {
 				return
@@ -773,8 +998,24 @@ func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 			s.userinfoResponse(next, w, r)
 			return
 		}
+
 		next.ServeHTTP(w, r)
 	})
+}
+func (s *realmServer) callbackGate(w http.ResponseWriter, r *http.Request) bool {
+	requestID := r.URL.Query().Get("id")
+	if requestID == "" {
+		http.Error(w, "invalid authorization completion", http.StatusBadRequest)
+		return false
+	}
+	cookie, err := r.Cookie(completionCookieName(requestID))
+	if err != nil || cookie.Value == "" || s.Store.ConsumeCompletionSecret(requestID, cookie.Value) != nil {
+		http.Error(w, "invalid authorization completion", http.StatusBadRequest)
+		return false
+	}
+	// #nosec G124 -- Secure is intentionally false only for validated local HTTP issuers.
+	http.SetCookie(w, &http.Cookie{Name: completionCookieName(requestID), Value: "", Path: s.basePath + "/authorize/callback", MaxAge: -1, HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
+	return true
 }
 
 func providerEndpointMethods(providerPath string) (string, bool) {
@@ -960,17 +1201,18 @@ func (s *realmServer) securityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", s.csp)
 }
 
-func configuredRedirectOrigins(realm config.Realm) []string {
+func configuredRedirectOrigins(realm config.Realm) ([]string, error) {
 	seen := make(map[string]struct{})
 	for _, client := range realm.Clients {
 		if client.Type != config.ClientTypeSPA {
 			continue
 		}
 		for _, raw := range client.RedirectURIs {
-			redirect, err := url.Parse(raw)
-			if err == nil {
-				seen[redirect.Scheme+"://"+redirect.Host] = struct{}{}
+			origin, err := canonicalRedirectOrigin(raw)
+			if err != nil {
+				return nil, fmt.Errorf("redirect URI %q cannot be represented as a CSP origin: %w", raw, err)
 			}
+			seen[origin] = struct{}{}
 		}
 	}
 	origins := make([]string, 0, len(seen))
@@ -978,8 +1220,75 @@ func configuredRedirectOrigins(realm config.Realm) []string {
 		origins = append(origins, origin)
 	}
 	sort.Strings(origins)
-	return origins
+	return origins, nil
 }
+
+func canonicalRedirectOrigin(raw string) (string, error) {
+	redirect, err := url.Parse(raw)
+	if err != nil || redirect.Host == "" || redirect.Hostname() == "" {
+		return "", errors.New("absolute URL with a host is required")
+	}
+	if redirect.Scheme != "http" && redirect.Scheme != "https" {
+		return "", errors.New("only HTTP(S) origins are supported")
+	}
+	if strings.HasSuffix(redirect.Host, ":") {
+		return "", errors.New("empty port is not a valid CSP host")
+	}
+	port := redirect.Port()
+	if strings.Contains(redirect.Hostname(), ":") {
+		if net.ParseIP(redirect.Hostname()) == nil {
+			return "", errors.New("invalid IPv6 host")
+		}
+		if !validPort(port) {
+			return "", errors.New("invalid port")
+		}
+		return redirect.Scheme + "://[" + strings.ToLower(redirect.Hostname()) + "]" + portSuffix(redirect.Scheme, port), nil
+	}
+	host := strings.TrimSuffix(strings.ToLower(redirect.Hostname()), ".")
+	ascii, err := idna.Lookup.ToASCII(host)
+	if err != nil || ascii == "" {
+		return "", errors.New("invalid IDNA hostname")
+	}
+	for _, label := range strings.Split(ascii, ".") {
+		if label == "" || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", errors.New("invalid hostname label")
+		}
+		for _, char := range label {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+				return "", errors.New("invalid hostname character")
+			}
+		}
+	}
+	if !validPort(port) {
+		return "", errors.New("invalid port")
+	}
+	return redirect.Scheme + "://" + ascii + portSuffix(redirect.Scheme, port), nil
+}
+
+func validPort(port string) bool {
+	if port == "" {
+		return true
+	}
+	value := 0
+	for _, char := range port {
+		if char < '0' || char > '9' {
+			return false
+		}
+		value = value*10 + int(char-'0')
+		if value > 65535 {
+			return false
+		}
+	}
+	return value > 0
+}
+
+func portSuffix(scheme, port string) string {
+	if port == "" || (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		return ""
+	}
+	return ":" + port
+}
+
 func (s *realmServer) asset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -1115,7 +1424,13 @@ func (s *realmServer) loginPOST(w http.ResponseWriter, r *http.Request) {
 		s.renderLogin(w, http.StatusUnauthorized, data)
 		return
 	}
+	completionSecret, err := s.Store.IssueCompletionSecret(id)
+	if err != nil {
+		http.Error(w, "unable to create authorization completion", http.StatusInternalServerError)
+		return
+	}
 	// #nosec G124 -- Secure is intentionally false only for validated local HTTP issuers.
+	http.SetCookie(w, &http.Cookie{Name: completionCookieName(id), Value: completionSecret, Path: s.basePath + "/authorize/callback", MaxAge: 600, Expires: time.Now().Add(10 * time.Minute), HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
 	http.SetCookie(w, &http.Cookie{Name: csrfCookieName(id), Value: "", Path: s.basePath + "/login", MaxAge: -1, HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, op.AuthCallbackURL(s.Provider)(r.Context(), id), http.StatusSeeOther)
 }
@@ -1147,6 +1462,10 @@ func (s *realmServer) loggedOut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+}
+func completionCookieName(requestID string) string {
+	digest := sha256.Sum256([]byte(requestID))
+	return "hoocloak_completion_" + base64.RawURLEncoding.EncodeToString(digest[:16])
 }
 
 func csrfCookieName(requestID string) string {

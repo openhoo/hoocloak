@@ -52,6 +52,13 @@ export default function App() {
     return () => auth.events.removeSilentRenewError(onSilentRenewError);
   }, [auth]);
 
+  useEffect(() => {
+    // react-oidc-context reports navigator failures through auth.error and
+    // resolves to null instead of rejecting, so the sign-out catch never runs.
+    if (auth.error?.source !== "signoutRedirect") return;
+    setPendingAction((current) => (current === "signout" ? null : current));
+  }, [auth.error]);
+
   async function signIn() {
     setActionError(null);
     setPendingAction("signin");

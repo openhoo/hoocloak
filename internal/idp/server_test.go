@@ -272,7 +272,22 @@ func TestAuthorizationPreservesSpecialCharacterRedirectURI(t *testing.T) {
 			if callbackURL.RawQuery != "" {
 				callbackPath += "?" + callbackURL.RawQuery
 			}
-			callback := performRequest(server.Handler, http.MethodGet, callbackPath, "", nil)
+			completionCookies := response.Result().Cookies()
+			var completionCookie *http.Cookie
+			for _, cookie := range completionCookies {
+				if strings.HasPrefix(cookie.Name, "hoocloak_completion_") && cookie.Value != "" {
+					completionCookie = cookie
+					break
+				}
+			}
+			if completionCookie == nil {
+				t.Fatalf("login did not set completion cookie: %#v", completionCookies)
+			}
+			callbackRequest := httptest.NewRequest(http.MethodGet, callbackPath, nil)
+			callbackRequest.AddCookie(completionCookie)
+			callbackRecorder := httptest.NewRecorder()
+			server.Handler.ServeHTTP(callbackRecorder, callbackRequest)
+			callback := callbackRecorder
 			if callback.Code != http.StatusFound {
 				t.Fatalf("callback status = %d, want %d; location=%q body=%s", callback.Code, http.StatusFound, callback.Header().Get("Location"), callback.Body.String())
 			}
@@ -302,6 +317,7 @@ func TestApplicationOwnedProtocolGates(t *testing.T) {
 		{"scope bypass", http.MethodGet, "/authorize?client_id=react-spa&response_type=code&scope=openid%20api.write&redirect_uri=" + url.QueryEscape("http://app.localhost:5173/auth/callback") + "&code_challenge=value&code_challenge_method=S256", "", nil, http.StatusBadRequest, "invalid_scope", false},
 		{"form client secret", http.MethodPost, "/oauth/token", "grant_type=client_credentials&client_id=worker&client_secret=worker-secret&scope=api.read", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, http.StatusUnauthorized, "invalid_client", true},
 		{"query client secret", http.MethodPost, "/oauth/token?grant_type=client_credentials&client_id=worker&client_secret=worker-secret&scope=api.read", "", nil, http.StatusUnauthorized, "invalid_client", true},
+
 		{"mixed basic and form identity", http.MethodPost, "/oauth/token", "grant_type=client_credentials&client_id=worker&scope=api.read", map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Authorization": "Basic d29ya2VyOndvcmtlci1zZWNyZXQ="}, http.StatusUnauthorized, "invalid_client", true},
 		{"missing logout hint", http.MethodGet, "/end_session", "", nil, http.StatusBadRequest, "invalid_request", false},
 	}
@@ -322,6 +338,65 @@ func TestApplicationOwnedProtocolGates(t *testing.T) {
 				t.Fatalf("WWW-Authenticate = %q, want Basic challenge", response.Header().Get("WWW-Authenticate"))
 			}
 		})
+	}
+}
+func TestAuthorizationCallbackRequiresAuthenticatingBrowser(t *testing.T) {
+	server := testServer(t, nil)
+	authorize := performRequest(server.Handler, http.MethodGet, "/authorize?client_id=react-spa&response_type=code&scope=openid&redirect_uri="+url.QueryEscape("http://app.localhost:5173/auth/callback")+"&code_challenge="+testCodeChallenge+"&code_challenge_method=S256", "", nil)
+	if authorize.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d", authorize.Code)
+	}
+	loginURL, err := url.Parse(authorize.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := loginURL.Query().Get("authRequestID")
+	login := performRequest(server.Handler, http.MethodGet, strings.TrimPrefix(loginURL.Path, server.basePath)+"?authRequestID="+url.QueryEscape(requestID), "", nil)
+	csrfCookies := login.Result().Cookies()
+	if len(csrfCookies) != 1 {
+		t.Fatalf("login cookies = %#v", csrfCookies)
+	}
+	form := url.Values{"authRequestID": {requestID}, "csrf": {csrfCookies[0].Value}, "username": {"alice"}, "password": {"alice-password"}}
+	post := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	post.AddCookie(csrfCookies[0])
+	postResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(postResponse, post)
+	if postResponse.Code != http.StatusSeeOther {
+		t.Fatalf("login POST status = %d, body=%s", postResponse.Code, postResponse.Body.String())
+	}
+	callbackURL, err := url.Parse(postResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackPath := strings.TrimPrefix(callbackURL.Path, server.basePath) + "?" + callbackURL.RawQuery
+	attacker := performRequest(server.Handler, http.MethodGet, callbackPath, "", nil)
+	if attacker.Code != http.StatusBadRequest {
+		t.Fatalf("unauthenticated callback status = %d, want 400", attacker.Code)
+	}
+	var completion *http.Cookie
+	for _, cookie := range postResponse.Result().Cookies() {
+		if strings.HasPrefix(cookie.Name, "hoocloak_completion_") && cookie.Value != "" {
+			completion = cookie
+			break
+		}
+	}
+	if completion == nil {
+		t.Fatalf("successful login did not set completion cookie: %#v", postResponse.Result().Cookies())
+	}
+	victimRequest := httptest.NewRequest(http.MethodGet, callbackPath, nil)
+	victimRequest.AddCookie(completion)
+	victimResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(victimResponse, victimRequest)
+	if victimResponse.Code != http.StatusFound {
+		t.Fatalf("authenticated callback status = %d, want 302; body=%s", victimResponse.Code, victimResponse.Body.String())
+	}
+	replayRequest := httptest.NewRequest(http.MethodGet, callbackPath, nil)
+	replayRequest.AddCookie(completion)
+	replayResponse := httptest.NewRecorder()
+	server.Handler.ServeHTTP(replayResponse, replayRequest)
+	if replayResponse.Code != http.StatusBadRequest {
+		t.Fatalf("replayed callback status = %d, want 400", replayResponse.Code)
 	}
 }
 
@@ -373,8 +448,9 @@ func TestAuthorizeGateRejectsDuplicateSecurityParameters(t *testing.T) {
 	valid := url.Values{
 		"client_id": {"react-spa"}, "response_type": {"code"}, "scope": {"openid"},
 		"redirect_uri": {"http://app.localhost:5173/auth/callback"}, "code_challenge": {testCodeChallenge}, "code_challenge_method": {"S256"},
+		"state": {"state-value"}, "nonce": {"nonce-value"},
 	}
-	for _, parameter := range []string{"client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method"} {
+	for _, parameter := range []string{"client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method", "state", "nonce"} {
 		t.Run("GET "+parameter, func(t *testing.T) {
 			query := make(url.Values, len(valid))
 			for key, values := range valid {
@@ -873,6 +949,26 @@ func TestLoginRejectsDuplicateSecurityParameters(t *testing.T) {
 		})
 	}
 }
+func TestConfiguredRedirectOriginsCanonicalizeCSPHosts(t *testing.T) {
+	tests := []struct {
+		name, raw, want string
+	}{
+		{"unicode", "https://BÜCHER.example/callback", "https://xn--bcher-kva.example"},
+		{"trailing dot", "https://APP.example./callback", "https://app.example"},
+		{"IPv6", "https://[2001:DB8::1]:8443/callback", "https://[2001:db8::1]:8443"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := canonicalRedirectOrigin(tt.raw)
+			if err != nil || got != tt.want {
+				t.Fatalf("canonicalRedirectOrigin(%q) = %q, %v; want %q", tt.raw, got, err, tt.want)
+			}
+		})
+	}
+	if _, err := canonicalRedirectOrigin("https://under_score.example/callback"); err == nil {
+		t.Fatal("underscore hostname accepted as CSP origin")
+	}
+}
 
 func TestIdentitySelectionLogin(t *testing.T) {
 	cfg := testConfig(t)
@@ -977,6 +1073,58 @@ func TestExternalLoginThemeSelection(t *testing.T) {
 		}
 	}
 }
+func TestLoginRejectsMismatchedAndReplayedCSRF(t *testing.T) {
+	for _, mode := range []string{config.LoginModePassword, config.LoginModeSelect} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.LoginMode = mode
+			server := testServerWithConfig(t, cfg, nil)
+			requestID := "csrf-" + mode
+			server.Store.authRequests[requestID] = &AuthRequest{id: requestID, clientID: "react-spa", expires: time.Now().Add(5 * time.Minute), scopes: []string{"openid"}}
+			page := performRequest(server.Handler, http.MethodGet, "/login?authRequestID="+requestID, "", nil)
+			cookies := page.Result().Cookies()
+			if len(cookies) != 1 {
+				t.Fatalf("login cookies = %#v", cookies)
+			}
+			form := url.Values{"authRequestID": {requestID}, "csrf": {"wrong-csrf"}}
+			if mode == config.LoginModePassword {
+				form.Set("username", "alice")
+				form.Set("password", "alice-password")
+			} else {
+				form.Set("identity", "alice")
+			}
+			post := func(values url.Values) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(values.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.AddCookie(cookies[0])
+				response := httptest.NewRecorder()
+				server.Handler.ServeHTTP(response, req)
+				return response
+			}
+			mismatch := post(form)
+			if mismatch.Code != http.StatusBadRequest || !strings.Contains(mismatch.Body.String(), "invalid CSRF token") {
+				t.Fatalf("mismatched CSRF response = %d %q", mismatch.Code, mismatch.Body.String())
+			}
+			if server.Store.authRequests[requestID].done {
+				t.Fatal("mismatched CSRF completed authorization")
+			}
+			form.Set("csrf", cookies[0].Value)
+			success := post(form)
+			if success.Code != http.StatusSeeOther {
+				t.Fatalf("successful login status = %d, body=%s", success.Code, success.Body.String())
+			}
+			request := server.Store.authRequests[requestID]
+			subject, amr := request.subject, slices.Clone(request.amr)
+			replay := post(form)
+			if replay.Code != http.StatusBadRequest {
+				t.Fatalf("replayed login status = %d, want 400", replay.Code)
+			}
+			if request.subject != subject || !slices.Equal(request.amr, amr) {
+				t.Fatalf("replay changed authentication state: subject=%q amr=%v", request.subject, request.amr)
+			}
+		})
+	}
+}
 
 func TestApplicationRouterAndRealmIsolation(t *testing.T) {
 	cfg := testConfig(t)
@@ -984,12 +1132,25 @@ func TestApplicationRouterAndRealmIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	partnerUserHash, err := bcrypt.GenerateFromPassword([]byte("partner-alice-password"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg.Realms = append(cfg.Realms, config.Realm{
 		Name: "partner",
+		Users: []config.User{{
+			ID: "alice", Username: "alice", PasswordHash: string(partnerUserHash),
+			Name: "Alice Partner", Email: "alice@partner.example", Roles: []string{"partner-admin"}, Permissions: []string{"partner.read"},
+		}},
 		Clients: []config.Client{
 			{
-				ID: "partner-spa", Type: config.ClientTypeSPA,
+				ID: "react-spa", Type: config.ClientTypeSPA,
 				RedirectURIs: []string{"http://partner.localhost:5174/auth/callback"}, Origins: []string{"http://partner.localhost:5174"},
+				Audiences: []string{"partner-api"}, AllowedScopes: []string{"openid", "profile", "partner.read"},
+			},
+			{
+				ID: "partner-spa", Type: config.ClientTypeSPA,
+				RedirectURIs: []string{"http://partner.localhost:5174/other-callback"}, Origins: []string{"http://partner.localhost:5174"},
 				Audiences: []string{"partner-api"}, AllowedScopes: []string{"openid", "partner.read"},
 			},
 			{
@@ -1108,6 +1269,118 @@ func TestApplicationRouterAndRealmIsolation(t *testing.T) {
 	}
 	if err := partnerSigned.Claims(developmentJWKS.Keys[0].Key, &jwt.Claims{}); err == nil {
 		t.Fatal("partner token verified with development JWKS")
+	}
+	verifier := "interactive-verifier"
+	digest := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
+	interactive := func(realm, password, redirect string) (string, string) {
+		runtime := application.realms[realm]
+		requestID := "same-request-id"
+		runtime.Store.authRequests[requestID] = &AuthRequest{
+			id: requestID, clientID: "react-spa", redirectURI: redirect, subject: "alice",
+			responseType: oidc.ResponseType("code"), responseMode: oidc.ResponseMode("query"),
+			expires: time.Now().Add(5 * time.Minute), scopes: []string{"openid", "profile"},
+			audience: []string{"partner-api"}, codeChallenge: &oidc.CodeChallenge{Challenge: challenge, Method: oidc.CodeChallengeMethodS256},
+		}
+		page := performRequest(application.Handler, http.MethodGet, "/realms/"+realm+"/login?authRequestID="+requestID, "", nil)
+		if page.Code != http.StatusOK {
+			t.Fatalf("%s login page status = %d", realm, page.Code)
+		}
+		csrf := page.Result().Cookies()[0]
+		form := url.Values{"authRequestID": {requestID}, "csrf": {csrf.Value}, "username": {"alice"}, "password": {password}}
+		req := httptest.NewRequest(http.MethodPost, "/realms/"+realm+"/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(csrf)
+		response := httptest.NewRecorder()
+		application.Handler.ServeHTTP(response, req)
+		if response.Code != http.StatusSeeOther {
+			t.Fatalf("%s login POST status = %d, body=%s", realm, response.Code, response.Body.String())
+		}
+		var completion *http.Cookie
+		for _, cookie := range response.Result().Cookies() {
+			if strings.HasPrefix(cookie.Name, "hoocloak_completion_") && cookie.Value != "" {
+				completion = cookie
+				break
+			}
+		}
+		if completion == nil {
+			t.Fatalf("%s missing completion cookie", realm)
+		}
+		callbackURL, err := url.Parse(response.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		callback := httptest.NewRequest(http.MethodGet, callbackURL.Path+"?"+callbackURL.RawQuery, nil)
+		callback.AddCookie(completion)
+		callbackResponse := httptest.NewRecorder()
+		application.Handler.ServeHTTP(callbackResponse, callback)
+		if callbackResponse.Code != http.StatusFound {
+			t.Fatalf("%s callback status = %d, body=%s", realm, callbackResponse.Code, callbackResponse.Body.String())
+		}
+		redirectURL, err := url.Parse(callbackResponse.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("parse %s callback redirect: %v", realm, err)
+		}
+		code := redirectURL.Query().Get("code")
+		if code == "" {
+			t.Fatalf("%s callback redirect = %q", realm, callbackResponse.Header().Get("Location"))
+		}
+		return code, completion.Name
+	}
+	developmentCode, _ := interactive("development", "alice-password", "http://app.localhost:5173/auth/callback")
+	partnerCode, _ := interactive("partner", "partner-alice-password", "http://partner.localhost:5174/auth/callback")
+	if developmentCode == "" || partnerCode == "" || developmentCode == partnerCode {
+		t.Fatalf("interactive realm codes = %q, %q", developmentCode, partnerCode)
+	}
+	exchange := func(realm, code string) *httptest.ResponseRecorder {
+		form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {"react-spa"},
+			"redirect_uri":  {map[string]string{"development": "http://app.localhost:5173/auth/callback", "partner": "http://partner.localhost:5174/auth/callback"}[realm]},
+			"code_verifier": {verifier}}
+		return performRequest(application.Handler, http.MethodPost, "/realms/"+realm+"/oauth/token", form.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	}
+	if cross := exchange("partner", developmentCode); cross.Code == http.StatusOK {
+		t.Fatal("development authorization code redeemed in partner realm")
+	}
+	if cross := exchange("development", partnerCode); cross.Code == http.StatusOK {
+		t.Fatal("partner authorization code redeemed in development realm")
+	}
+	developmentInteractive := exchange("development", developmentCode)
+	partnerInteractive := exchange("partner", partnerCode)
+	if developmentInteractive.Code != http.StatusOK || partnerInteractive.Code != http.StatusOK {
+		t.Fatalf("interactive token status = %d, %d", developmentInteractive.Code, partnerInteractive.Code)
+	}
+	var developmentInteractiveToken, partnerInteractiveToken struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(developmentInteractive.Body.Bytes(), &developmentInteractiveToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(partnerInteractive.Body.Bytes(), &partnerInteractiveToken); err != nil {
+		t.Fatal(err)
+	}
+	developmentSigned, err = jwt.ParseSigned(developmentInteractiveToken.AccessToken, []jose.SignatureAlgorithm{jose.RS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partnerSigned, err = jwt.ParseSigned(partnerInteractiveToken.AccessToken, []jose.SignatureAlgorithm{jose.RS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var developmentProfile, partnerProfile struct {
+		jwt.Claims
+		Name              string `json:"name"`
+		PreferredUsername string `json:"preferred_username"`
+	}
+	if err := developmentSigned.Claims(developmentJWKS.Keys[0].Key, &developmentProfile); err != nil {
+		t.Fatal(err)
+	}
+	if err := partnerSigned.Claims(partnerJWKS.Keys[0].Key, &partnerProfile); err != nil {
+		t.Fatal(err)
+	}
+	if developmentProfile.Issuer != cfg.RealmIssuer("development") || partnerProfile.Issuer != cfg.RealmIssuer("partner") ||
+		developmentProfile.Name != "Alice Admin" || partnerProfile.Name != "Alice Partner" ||
+		developmentProfile.PreferredUsername != "alice" || partnerProfile.PreferredUsername != "alice" {
+		t.Fatalf("interactive realm profiles = %#v, %#v", developmentProfile, partnerProfile)
 	}
 }
 
@@ -1342,6 +1615,8 @@ func TestExternalLoginThemePreflightBrowserEffectiveControls(t *testing.T) {
 		name, login, want string
 	}{
 		{"literal duplicate attribute", `<form method="get" method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "must not be repeated"},
+		{"nested form inside GET form", `<form method="get"><form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form></form>`, "nested forms"},
+		{"associated submitter override", `<form id="login" method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form><button type="submit" form="login" formmethod="get">Continue</button>`, "form method"},
 		{"form-feed duplicate attribute", `<form method="post"` + "\f" + `method="get" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>`, "must not be repeated"},
 		{"encoded attribute name stays literal", `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input na&#x6d;e="username"><input name="password" type="password"></form>`, "username control"},
 		{"unquoted root asset", `<img src=/assets/leak.css><form method=post action="{{.BasePath}}/login"><input type=hidden name=authRequestID><input type=hidden name=csrf><input name=username><input name=password type=password></form>`, "root-relative"},
@@ -1428,6 +1703,30 @@ func TestThemePreflightUsesBrowserTokenization(t *testing.T) {
 				t.Fatal("validateLoginHTML() accepted inert required controls")
 			}
 		})
+	}
+	for _, mode := range []string{"open", "closed"} {
+		shadow := `<div><template shadowrootmode="` + mode + `"><form method="post" action="` + basePath + `/login"><input type="hidden" name="authRequestID" value="request-id"><input type="hidden" name="csrf" value="csrf-token"><input name="username"><input name="password" type="password"></form></template></div>`
+		if err := validateLoginHTML(shadow, basePath, config.LoginModePassword, "request-id", "csrf-token"); err != nil {
+			t.Fatalf("%s declarative shadow login rejected: %v", mode, err)
+		}
+	}
+	if err := validateLoginHTML(`<form method="post" action="`+basePath+`/login"><input type="hidden" name="authRequestID" value="request-id"><input type="hidden" name="csrf" value="csrf-token"><input name="username"><input name="password" type="password"></form><template shadowrootmode="open"><form method="post" action="`+basePath+`/login"></form></template>`, basePath, config.LoginModePassword, "request-id", "csrf-token"); err == nil {
+		t.Fatal("additional declarative shadow POST form was accepted")
+	}
+	if err := validateRealmRelativeURLs(`<svg><style><div><img src="/assets/breakout.png"></div></style></svg>`); err == nil {
+		t.Fatal("foreign raw-text breakout URL was accepted")
+	}
+	if err := validateRealmRelativeURLs(`<template shadowrootmode="open"><img src="/assets/shadow.png"></template>`); err == nil {
+		t.Fatal("declarative shadow root URL was accepted")
+	}
+	if err := validateRealmRelativeURLs(`<img srcset="data:image/svg+xml,%3Csvg%3E,/assets/logo.svg%3C/svg%3E 1x">`); err != nil {
+		t.Fatalf("data URL with internal comma rejected: %v", err)
+	}
+	if err := validateRealmRelativeURLs(`<img srcset="https://example.test/image.png 1x, /assets/logo.svg 2x">`); err == nil {
+		t.Fatal("genuine later root-relative srcset candidate was accepted")
+	}
+	if err := validateLoginHTML(`<form method="get"><button type="submit" formaction="/search">Search</button></form><form method="post" action="`+basePath+`/login"><input type="hidden" name="authRequestID" value="request-id"><input type="hidden" name="csrf" value="csrf-token"><input name="username"><input name="password" type="password"></form>`, basePath, config.LoginModePassword, "request-id", "csrf-token"); err != nil {
+		t.Fatalf("unrelated GET submitter override rejected: %v", err)
 	}
 	if err := validateRealmRelativeURLs(`<script>const example = '<img src="/assets/example.png">'</script><template><img src="/assets/template.png"></template><img src="` + basePath + `/assets/live.png">`); err != nil {
 		t.Fatalf("validateRealmRelativeURLs() rejected inert markup: %v", err)

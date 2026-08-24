@@ -4,7 +4,9 @@ image:
   repository: ghcr.io/openhoo/hoocloak
   pullPolicy: IfNotPresent
   tag: ""
-  # When set, digest takes precedence over tag. Example: sha256:abc123...
+  # When set, digest takes precedence over tag. Must be a lowercase SHA-256
+  # digest (OCI forbids uppercase hexadecimal); CI asserts uppercase rejection.
+  # Example: sha256:abc123...
   digest: ""
 
 imagePullSecrets: []

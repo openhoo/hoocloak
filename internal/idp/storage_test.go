@@ -64,7 +64,13 @@ func BenchmarkRevokeFamilyWithManyFamilies(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		store.revokeFamilyLocked("family-5000")
+		b.StopTimer()
+		familyID := "family-5000"
+		hash := sha256.Sum256([]byte(familyID))
+		store.families[familyID] = &refreshFamily{id: familyID, tokens: [][32]byte{hash}}
+		store.refresh[hash] = &refreshRecord{familyID: familyID}
+		b.StartTimer()
+		store.revokeFamilyLocked(familyID)
 	}
 }
 
@@ -472,6 +478,86 @@ func TestRefreshRotationAndAncestorReplayRevokesFamily(t *testing.T) {
 		t.Fatal("family replay left successor access metadata active")
 	}
 }
+func TestRefreshReuseAfterTwoSuccessfulLookupsRevokesSuccessor(t *testing.T) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := newTestStore(t, clock)
+	request := &AuthRequest{
+		id: "two-lookups", clientID: "react-spa", subject: "alice", audience: []string{"hoocloak-api"},
+		scopes: []string{"openid", "offline_access", "api.read"}, authTime: clock.Now(), amr: []string{"pwd"},
+		done: true, expires: clock.Now().Add(5 * time.Minute),
+	}
+	store.authRequests[request.id] = request
+	if err := store.SaveAuthCode(context.Background(), request.id, "two-lookups-code"); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := store.AuthRequestByCode(context.Background(), "two-lookups-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, firstRefresh, _, err := store.CreateAccessAndRefreshTokens(context.Background(), auth, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstLookup, err := store.TokenRequestByRefreshToken(context.Background(), firstRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLookup, err := store.TokenRequestByRefreshToken(context.Background(), firstRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successorAccess, successorRefresh, _, err := store.CreateAccessAndRefreshTokens(context.Background(), firstLookup, firstRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := store.CreateAccessAndRefreshTokens(context.Background(), secondLookup, firstRefresh); err == nil {
+		t.Fatal("second prevalidated refresh exchange succeeded")
+	}
+	if _, err := store.TokenRequestByRefreshToken(context.Background(), successorRefresh); err == nil {
+		t.Fatal("successor refresh token remained usable after reuse")
+	}
+	if _, exists := store.access[successorAccess]; exists {
+		t.Fatal("successor access metadata remained after reuse")
+	}
+	if len(store.families) != 0 || len(store.refresh) != 0 {
+		t.Fatalf("revoked family state retained: families=%d refresh=%d", len(store.families), len(store.refresh))
+	}
+}
+
+func TestRevocationDeletesRefreshFamilyState(t *testing.T) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	store := newTestStore(t, clock)
+	newFamily := func(t *testing.T) (string, string) {
+		t.Helper()
+		request := &RefreshRequest{clientID: "react-spa", subject: "alice", audience: []string{"hoocloak-api"}, scopes: []string{"openid"}, authTime: clock.Now(), amr: []string{"pwd"}}
+		access, refresh, _, err := store.CreateAccessAndRefreshTokens(context.Background(), request, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return access, refresh
+	}
+	access, refresh := newFamily(t)
+	if err := store.RevokeToken(context.Background(), refresh, "", "react-spa"); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.families) != 0 || len(store.refresh) != 0 || len(store.access) != 0 {
+		t.Fatalf("refresh revocation retained state: families=%d refresh=%d access=%d", len(store.families), len(store.refresh), len(store.access))
+	}
+	access, _ = newFamily(t)
+	if err := store.RevokeToken(context.Background(), access, "", "react-spa"); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.families) != 0 || len(store.refresh) != 0 || len(store.access) != 0 {
+		t.Fatalf("access revocation retained state: families=%d refresh=%d access=%d", len(store.families), len(store.refresh), len(store.access))
+	}
+	newFamily(t)
+	if err := store.TerminateSession(context.Background(), "alice", "react-spa"); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.families) != 0 || len(store.refresh) != 0 || len(store.access) != 0 {
+		t.Fatalf("session termination retained state: families=%d refresh=%d access=%d", len(store.families), len(store.refresh), len(store.access))
+	}
+}
 
 func TestRefreshFamilyUsesNonSlidingAbsoluteExpiry(t *testing.T) {
 	start := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -600,5 +686,28 @@ func TestAuthenticationRechecksExpiryAfterPasswordVerification(t *testing.T) {
 	}
 	if request.done {
 		t.Fatal("expired authorization request was marked complete")
+	}
+}
+func TestCredentialCheckSlotsRejectAndRelease(t *testing.T) {
+	testConfig(t)
+	for len(credentialHashSlots) < cap(credentialHashSlots) {
+		credentialHashSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for len(credentialHashSlots) > 0 {
+			<-credentialHashSlots
+		}
+	})
+	if _, err := compareCredential(testUserHash, "alice-password"); !errors.Is(err, errCredentialChecksBusy) {
+		t.Fatalf("saturated credential check error = %v, want %v", err, errCredentialChecksBusy)
+	}
+	<-credentialHashSlots
+	before := len(credentialHashSlots)
+	ok, err := compareCredential(testUserHash, "alice-password")
+	if err != nil || !ok {
+		t.Fatalf("released credential check = (%v, %v)", ok, err)
+	}
+	if len(credentialHashSlots) != before {
+		t.Fatalf("credential slot occupancy = %d, want %d", len(credentialHashSlots), before)
 	}
 }

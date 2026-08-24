@@ -1,6 +1,6 @@
 Hoocloak operational endpoints inside the cluster:
-  Readiness: http://{{ include "hoocloak.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/ready
-  Health:    http://{{ include "hoocloak.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/healthz
+  Readiness: http://{{ include "hoocloak.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/ready
+  Health:    http://{{ include "hoocloak.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/healthz
 
 {{- if .Values.ingress.enabled }}
 Configured ingress hosts:

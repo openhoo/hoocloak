@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -171,6 +171,16 @@ jobs:
           fi
           helm template hoocloak charts/hoocloak --namespace hoocloak \
             --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > /dev/null
+          if helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set-string image.digest=sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA > /dev/null 2>&1; then
+            echo "uppercase image digest was accepted" >&2
+            exit 1
+          fi
+          if helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set 'ingress.hosts[0].host=192.0.2.10' > /dev/null 2>&1; then
+            echo "IP-literal ingress host was accepted" >&2
+            exit 1
+          fi
           helm package charts/hoocloak --destination "$RUNNER_TEMP"
       - name: Smoke theme image on Kubernetes
         run: |
@@ -209,8 +219,28 @@ jobs:
           theme_ref="$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5001/hoocloak-theme:ci)"
           test -n "$theme_ref"
 
+          docker build \
+            --build-arg "VERSION=ci-${GITHUB_SHA::12}" \
+            --provenance=false \
+            --tag localhost:5001/hoocloak:ci \
+            .
+          docker push localhost:5001/hoocloak:ci
+          app_ref="$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5001/hoocloak:ci)"
+          test -n "$app_ref"
+          app_repository="${app_ref%@*}"
+          app_digest="${app_ref#*@}"
+          case "$app_digest" in
+            sha256:*) ;;
+            *)
+              echo "application image reference is not digest-pinned: $app_ref" >&2
+              exit 1
+              ;;
+          esac
+
           helm upgrade --install hoocloak charts/hoocloak \
             --namespace hoocloak --create-namespace \
+            --set-string "image.repository=$app_repository" \
+            --set-string "image.digest=$app_digest" \
             --set-string "theme.image.reference=$theme_ref" \
             --wait --timeout 2m
           test "$(kubectl -n hoocloak get pod -l app.kubernetes.io/instance=hoocloak -o jsonpath='{.items[0].status.initContainerStatuses[0].state.terminated.exitCode}')" = "0"

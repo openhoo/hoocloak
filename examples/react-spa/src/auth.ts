@@ -1,6 +1,8 @@
 import type { AuthProviderProps } from "react-oidc-context";
 import {
+  UserManager,
   WebStorageStateStore,
+  type SigninSilentArgs,
   type SignoutResponse,
   type User,
 } from "oidc-client-ts";
@@ -106,7 +108,11 @@ function onSignoutCallback(response: SignoutResponse | undefined): void {
 
 const origin = window.location.origin;
 
-export const authConfig: AuthProviderProps = {
+// StrictMode double-mounts AuthProvider in development, and react-oidc-context
+// would otherwise construct a second manager whose duplicate automatic-renew
+// timer races this tab's single-use refresh token until the provider revokes
+// the whole token family. One module-scoped manager owns renewal instead.
+const userManager = new UserManager({
   authority: authority.toString(),
   client_id: "react-spa",
   redirect_uri: `${origin}/auth/callback`,
@@ -119,6 +125,21 @@ export const authConfig: AuthProviderProps = {
   revokeTokensOnSignout: true,
   userStore: new WebStorageStateStore({ store: window.sessionStorage }),
   stateStore: new WebStorageStateStore({ store: window.sessionStorage }),
+});
+
+const startSilentRenewal = userManager.signinSilent.bind(userManager);
+let renewalInFlight: Promise<User | null> | null = null;
+userManager.signinSilent = (args?: SigninSilentArgs): Promise<User | null> => {
+  // Single-flight: coalesce overlapping background and manual renewals so the
+  // provider never sees one consumed refresh token submitted twice.
+  renewalInFlight ??= startSilentRenewal(args).finally(() => {
+    renewalInFlight = null;
+  });
+  return renewalInFlight;
+};
+
+export const authConfig: AuthProviderProps = {
+  userManager,
   onSigninCallback,
   matchSignoutCallback: () => window.location.pathname === "/auth/logout/callback",
   onSignoutCallback,

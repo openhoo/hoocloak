@@ -383,6 +383,47 @@ func (s *Store) completeAuthenticationLocked(requestID string, user config.User,
 	return nil
 }
 
+// IssueCompletionSecret binds a one-time continuation secret to a completed
+// authorization request. The caller delivers the returned value only to the
+// browser that submitted the successful login.
+func (s *Store) IssueCompletionSecret(requestID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(s.now())
+	request, ok := s.authRequests[requestID]
+	if !ok || !request.done {
+		return "", errors.New("authorization request is missing or incomplete")
+	}
+	secret, err := randomID()
+	if err != nil {
+		return "", err
+	}
+	request.mu.Lock()
+	request.completionHash = sha256.Sum256([]byte(secret))
+	request.mu.Unlock()
+	return secret, nil
+}
+
+var errCompletionDenied = errors.New("authorization completion proof denied")
+
+func (s *Store) ConsumeCompletionSecret(requestID, secret string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(s.now())
+	request, ok := s.authRequests[requestID]
+	if !ok {
+		return errCompletionDenied
+	}
+	supplied := sha256.Sum256([]byte(secret))
+	request.mu.Lock()
+	defer request.mu.Unlock()
+	if request.completionHash == ([32]byte{}) || subtle.ConstantTimeCompare(request.completionHash[:], supplied[:]) != 1 {
+		return errCompletionDenied
+	}
+	request.completionHash = [32]byte{}
+	return nil
+}
+
 func (s *Store) LoginInfo(requestID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -429,17 +470,17 @@ func (s *Store) createAccessToken(request op.TokenRequest, familyID string) (str
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	now := s.now()
-	expires := now.Add(s.tokens.AccessTTL.Duration)
 	clientID, authTime, amr, err := tokenRequestInfo(request)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	audience := slices.Clone(s.clients[clientID].config.Audiences)
 	scopes := request.GetScopes()
-	record := accessRecord{id: id, clientID: clientID, subject: request.GetSubject(), audience: audience, scopes: scopes, expires: expires, issuedAt: now, authTime: authTime, amr: amr, familyID: familyID}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
+	expires := now.Add(s.tokens.AccessTTL.Duration)
+	record := accessRecord{id: id, clientID: clientID, subject: request.GetSubject(), audience: audience, scopes: scopes, expires: expires, issuedAt: now, authTime: authTime, amr: amr, familyID: familyID}
 	s.pruneLocked(now)
 	if err := s.reserveAuthorizationCodeLocked(request); err != nil {
 		return "", time.Time{}, err
@@ -450,7 +491,6 @@ func (s *Store) createAccessToken(request op.TokenRequest, familyID string) (str
 }
 
 func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.TokenRequest, current string) (string, string, time.Time, error) {
-	now := s.now()
 	clientID, authTime, amr, err := tokenRequestInfo(request)
 	if err != nil {
 		return "", "", time.Time{}, err
@@ -464,10 +504,11 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
-	expires := now.Add(s.tokens.AccessTTL.Duration)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
+	expires := now.Add(s.tokens.AccessTTL.Duration)
 	s.pruneLocked(now)
 	if err := s.reserveAuthorizationCodeLocked(request); err != nil {
 		return "", "", time.Time{}, err
@@ -551,7 +592,11 @@ func (s *Store) revokeFamilyLocked(id string) {
 			continue
 		}
 		delete(s.access, consumeRefreshRecord(record))
+		delete(s.refresh, hash)
 	}
+	// A revoked family is unusable by construction: every consumer rejects a
+	// missing refresh record or family, so no tombstones are retained.
+	delete(s.families, id)
 }
 
 func (s *Store) TerminateSession(_ context.Context, userID, clientID string) error {
@@ -781,6 +826,7 @@ type AuthRequest struct {
 	responseMode                                     oidc.ResponseMode
 	created, expires, authTime                       time.Time
 	done, codeSaved, accessAudienceReturned          bool
+	completionHash                                   [32]byte
 }
 
 func (r *AuthRequest) GetID() string  { return r.id }

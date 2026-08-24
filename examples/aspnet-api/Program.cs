@@ -40,6 +40,10 @@ builder.Services
         {
             ValidateIssuer = true,
             ValidateAudience = true,
+            // Microsoft.IdentityModel.Tokens 8.x ignores a trailing '/' when comparing audiences by default;
+            // Hoocloak copies configured client audiences into tokens verbatim, so "hoocloak-api/" and
+            // "hoocloak-api" are distinct issuances and must not both satisfy this API.
+            IgnoreTrailingSlashWhenValidatingAudience = false,
             ValidateIssuerSigningKey = true,
             ValidateLifetime = true,
             RequireSignedTokens = true,
