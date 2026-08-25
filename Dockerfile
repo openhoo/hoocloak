@@ -5,7 +5,7 @@ RUN --mount=type=cache,id=hoocloak-npm,target=/root/.npm,sharing=locked npm ci -
 COPY ui/login/ ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,id=hoocloak-go-mod,target=/go/pkg/mod,sharing=shared go mod download
