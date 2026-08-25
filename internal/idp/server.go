@@ -1427,6 +1427,8 @@ func (s *realmServer) loginPOST(w http.ResponseWriter, r *http.Request) {
 	}
 	// #nosec G124 -- Secure is intentionally false only for validated local HTTP issuers.
 	http.SetCookie(w, &http.Cookie{Name: completionCookieName(id), Value: completionSecret, Path: s.basePath + "/authorize/callback", MaxAge: 600, Expires: time.Now().Add(10 * time.Minute), HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
+	// #nosec G124 -- deleting the login CSRF cookie; attributes retained so the
+	// clearing cookie matches the one it replaces.
 	http.SetCookie(w, &http.Cookie{Name: csrfCookieName(id), Value: "", Path: s.basePath + "/login", MaxAge: -1, HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, op.AuthCallbackURL(s.Provider)(r.Context(), id), http.StatusSeeOther)
 }
