@@ -53,6 +53,28 @@ jobs:
             bun "$HOOVERSION_DIR/src/cli.ts" lint \
               --from "${{ github.event.pull_request.base.sha }}" \
               --to "${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] ||
+              [ "$before" = "0000000000000000000000000000000000000000" ] ||
+              ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+              before=""
+            fi
+            if [ -z "$before" ]; then
+              default_branch="origin/${{ github.event.repository.default_branch }}"
+              if git rev-parse --verify --quiet "$default_branch" > /dev/null 2>&1 &&
+                [ "$(git rev-parse "$default_branch")" != "${{ github.sha }}" ]; then
+                before="$default_branch"
+              fi
+            fi
+            if [ -n "$before" ]; then
+              bun "$HOOVERSION_DIR/src/cli.ts" lint \
+                --from "$before" \
+                --to "${{ github.sha }}"
+            else
+              echo "no push commit range available; linting the tip commit" >&2
+              bun "$HOOVERSION_DIR/src/cli.ts" lint --last
+            fi
           else
             bun "$HOOVERSION_DIR/src/cli.ts" lint --last
           fi
