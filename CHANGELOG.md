@@ -1,5 +1,18 @@
 # hoocloak Changelog
 
+## 2.0.2 (2026-08-25)
+
+### Bug Fixes
+
+- harden auth completion, validation, and delivery gates (b7c37ca)
+- **idp:** bound refresh family index growth (9156539)
+- **idp:** justify G124 on CSRF cookie clear (8f8db0d)
+
+### Other Changes
+
+- lint full pushed commit range (16fedfe)
+- move CI and image to Go 1.26.6 (da759df)
+
 ## 2.0.1 (2026-08-10)
 
 ### Bug Fixes
