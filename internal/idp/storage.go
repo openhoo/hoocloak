@@ -196,6 +196,17 @@ func (s *Store) pruneLocked(now time.Time) {
 		}
 		consider(record.expires)
 	}
+	// Consumed refresh records survive only for replay detection; reclaim
+	// them once their family is gone or expired.
+	for hash, record := range s.refresh {
+		if !record.consumed {
+			continue
+		}
+		if family := s.families[record.familyID]; family != nil && now.Before(family.expires) {
+			continue
+		}
+		delete(s.refresh, hash)
+	}
 	for id, family := range s.families {
 		if !now.Before(family.expires) {
 			delete(s.families, id)
@@ -539,6 +550,7 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 			return "", "", time.Time{}, oidc.ErrInvalidGrant()
 		}
 		delete(s.access, consumeRefreshRecord(old))
+		s.compactFamilyTokensLocked(family)
 	}
 	audience := slices.Clone(s.clients[clientID].config.Audiences)
 	scopes := request.GetScopes()
@@ -580,18 +592,32 @@ func consumeRefreshRecord(record *refreshRecord) string {
 	return accessID
 }
 
+// compactFamilyTokensLocked drops consumed entries from the family token
+// index; replay detection consults s.refresh directly and pruneLocked
+// reclaims consumed records when their family ends.
+func (s *Store) compactFamilyTokensLocked(family *refreshFamily) {
+	live := family.tokens[:0]
+	for _, hash := range family.tokens {
+		if record := s.refresh[hash]; record != nil && !record.consumed {
+			live = append(live, hash)
+		}
+	}
+	family.tokens = live
+}
+
 func (s *Store) revokeFamilyLocked(id string) {
 	family := s.families[id]
 	if family == nil {
 		return
 	}
 	family.revoked = true
-	for _, hash := range family.tokens {
-		record := s.refresh[hash]
-		if record == nil {
+	for hash, record := range s.refresh {
+		if record.familyID != id {
 			continue
 		}
-		delete(s.access, consumeRefreshRecord(record))
+		if !record.consumed {
+			delete(s.access, consumeRefreshRecord(record))
+		}
 		delete(s.refresh, hash)
 	}
 	// A revoked family is unusable by construction: every consumer rejects a

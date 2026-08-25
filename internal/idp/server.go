@@ -434,22 +434,21 @@ type loginFormScope struct {
 }
 
 type loginFormValidation struct {
-	postForms    int
-	postForm     int
-	action       string
-	controls     map[string]loginControlValidation
-	controlCount map[string]int
-	fieldsets    []loginFieldsetValidation
-	elements     []string
-	forms        []loginFormRecord
-	formIDs      map[string]int
-	overrides    []loginSubmitOverride
+	postForms int
+	postForm  int
+	action    string
+	controls  map[string]loginControlValidation
+	fieldsets []loginFieldsetValidation
+	elements  []string
+	forms     []loginFormRecord
+	formIDs   map[string]int
+	overrides []loginSubmitOverride
 }
 
 func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 	validation := loginFormValidation{
 		postForm: -1, controls: make(map[string]loginControlValidation),
-		controlCount: make(map[string]int), formIDs: make(map[string]int),
+		formIDs: make(map[string]int),
 	}
 	walker := newBrowserHTMLWalker(document)
 	scopes := []loginFormScope{{postForm: -1}}
@@ -561,7 +560,6 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 				validation.postForm = formIndex
 				validation.action = attributes["action"]
 				validation.controls = make(map[string]loginControlValidation)
-				validation.controlCount = make(map[string]int)
 			}
 		}
 		if name == "input" || name == "select" || name == "textarea" || name == "button" {
@@ -605,11 +603,9 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 				if sensitive {
 					for existing := range validation.controls {
 						if strings.EqualFold(existing, controlName) {
-							validation.controlCount[existing]++
 							return fmt.Errorf("login form must not contain duplicate %s controls", controlName)
 						}
 					}
-					validation.controlCount[controlName]++
 				}
 				validation.controls[controlName] = loginControlValidation{kind: strings.ToLower(attributes["type"]), value: attributes["value"]}
 			}
