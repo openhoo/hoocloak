@@ -1,5 +1,15 @@
 # hoocloak Changelog
 
+## 2.0.3 (2026-08-30)
+
+### Bug Fixes
+
+- **cli:** redact password-derived errors (#2) (a4b4a61)
+
+### Other Changes
+
+- standardize Hoostack dogfood (#1) (1af3ad6)
+
 ## 2.0.2 (2026-08-25)
 
 ### Bug Fixes
