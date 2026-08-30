@@ -24,7 +24,7 @@ concurrency:
 
 env:
   BUN_VERSION: 1.3.14
-  HOOVERSION_SHA: 799ecf4a9c29e8ce4d5ad7055a6030adf665cf82 # v0.2.0
+  HOOVERSION_VERSION: 1.0.3
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
   DOCKERHUB_IMAGE: openhoo/hoocloak
 
@@ -157,40 +157,15 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
-      - name: Install Hooversion
-        if: (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') && steps.manual_prerequisite.outputs.resume != 'true'
-        run: |
-          set -euo pipefail
-          install_dir="$(mktemp -d "$RUNNER_TEMP/hooversion.XXXXXXXX")"
-          echo "HOOVERSION_DIR=$install_dir" >> "$GITHUB_ENV"
-          git init "$install_dir"
-          git -C "$install_dir" fetch --depth 1 https://github.com/openhoo/hooversion.git "$HOOVERSION_SHA"
-          git -C "$install_dir" checkout --detach FETCH_HEAD
-          test "$(git -C "$install_dir" rev-parse HEAD)" = "$HOOVERSION_SHA"
-          cd "$install_dir"
-          bun install --frozen-lockfile
-
-      - name: Configure release git author
-        if: (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') && steps.manual_prerequisite.outputs.resume != 'true'
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
       - name: Release
         id: release
         if: (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') && steps.manual_prerequisite.outputs.resume != 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          args=(release --no-github)
-          if [ "$DRY_RUN" = "true" ]; then
-            args+=(--dry-run)
-          fi
-          bun "$HOOVERSION_DIR/src/cli.ts" "${args[@]}"
+        uses: openhoo/hooversion/actions/release@4aa43b4d775c7b03d196b06381013f4601467c57 # v1.0.3
+        with:
+          version: ${{ env.HOOVERSION_VERSION }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          github: false
 
       - name: Resolve publication metadata
         id: metadata
@@ -262,10 +237,6 @@ jobs:
             echo "tag=$tag"
             echo "version=$version"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Remove Hooversion checkout
-        if: always()
-        run: test -z "${HOOVERSION_DIR:-}" || rm -rf "$HOOVERSION_DIR"
 
   publish-chart:
     name: Publish Helm chart

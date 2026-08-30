@@ -15,8 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  BUN_VERSION: 1.3.14
-  HOOVERSION_SHA: 799ecf4a9c29e8ce4d5ad7055a6030adf665cf82 # v0.2.0
+  HOOVERSION_VERSION: 1.0.3
   KIND_VERSION: 0.32.0
 
 jobs:
@@ -29,59 +28,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-
-      - name: Install Hooversion
-        run: |
-          set -euo pipefail
-          install_dir="$(mktemp -d "$RUNNER_TEMP/hooversion.XXXXXXXX")"
-          echo "HOOVERSION_DIR=$install_dir" >> "$GITHUB_ENV"
-          git init "$install_dir"
-          git -C "$install_dir" fetch --depth 1 https://github.com/openhoo/hooversion.git "$HOOVERSION_SHA"
-          git -C "$install_dir" checkout --detach FETCH_HEAD
-          test "$(git -C "$install_dir" rev-parse HEAD)" = "$HOOVERSION_SHA"
-          cd "$install_dir"
-          bun install --frozen-lockfile
-
       - name: Lint commits
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            bun "$HOOVERSION_DIR/src/cli.ts" lint \
-              --from "${{ github.event.pull_request.base.sha }}" \
-              --to "${{ github.event.pull_request.head.sha }}"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            before="${{ github.event.before }}"
-            if [ -z "$before" ] ||
-              [ "$before" = "0000000000000000000000000000000000000000" ] ||
-              ! git cat-file -e "$before^{commit}" 2>/dev/null; then
-              before=""
-            fi
-            if [ -z "$before" ]; then
-              default_branch="origin/${{ github.event.repository.default_branch }}"
-              if git rev-parse --verify --quiet "$default_branch" > /dev/null 2>&1 &&
-                [ "$(git rev-parse "$default_branch")" != "${{ github.sha }}" ]; then
-                before="$default_branch"
-              fi
-            fi
-            if [ -n "$before" ]; then
-              bun "$HOOVERSION_DIR/src/cli.ts" lint \
-                --from "$before" \
-                --to "${{ github.sha }}"
-            else
-              echo "no push commit range available; linting the tip commit" >&2
-              bun "$HOOVERSION_DIR/src/cli.ts" lint --last
-            fi
-          else
-            bun "$HOOVERSION_DIR/src/cli.ts" lint --last
-          fi
-
-      - name: Remove Hooversion checkout
-        if: always()
-        run: test -z "${HOOVERSION_DIR:-}" || rm -rf "$HOOVERSION_DIR"
+        uses: openhoo/hooversion/actions/lint@4aa43b4d775c7b03d196b06381013f4601467c57 # v1.0.3
+        with:
+          version: ${{ env.HOOVERSION_VERSION }}
 
   test:
     name: Go tests
@@ -384,3 +334,39 @@ jobs:
       - name: Remove CI containers
         if: always()
         run: docker compose down --volumes --remove-orphans
+
+  policy:
+    name: Hoostack policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Enforce Hoolicy policy
+        uses: openhoo/hoolicy/actions/check@584ed5abf673dfb9b1d5279dfaa78329a94a9ea5 # v0.2.3
+        with:
+          version: 0.2.3
+
+      - name: Scan with Hooray
+        uses: openhoo/hooray/actions/scan@d06c0948b4747995e2ef755cb6260d07f75c1b14 # v0.6.2
+        with:
+          version: 0.6.2
+          policy: hooray-policy.yaml
+          format: table
+          output: ""
+
+      - name: Analyze with Hoonarqube
+        uses: openhoo/hoonarqube/actions/analyze@79e847af3edebc70685aaf90d3db7cdfcb557e97 # v0.2.2
+        with:
+          version: 0.2.2
+          paths: |
+            cmd
+            internal
+            ui
+            tests
+          output: ${{ runner.temp }}/hoonarqube.json
+          fail-on: none
