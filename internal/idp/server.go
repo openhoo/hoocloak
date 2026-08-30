@@ -245,7 +245,7 @@ func loadUI(themeDir string) (*template.Template, fs.FS, error) {
 func preflightUITemplates(templates *template.Template) error {
 	const basePath = "/realms/hoocloak-theme-preflight"
 	identity := loginIdentity{ID: "user-id", Username: "username", Name: "Example User", Email: "user@example.test"}
-	password := loginData{
+	credentialForm := loginData{
 		BasePath: basePath, RequestID: "request-id", Client: "Example client", CSRF: "csrf-token",
 		Mode: config.LoginModePassword, Username: "username", Error: "invalid credentials",
 	}
@@ -259,7 +259,7 @@ func preflightUITemplates(templates *template.Template) error {
 		template string
 		data     any
 		mode     string
-	}{{name: "login", template: "login", data: password, mode: config.LoginModePassword}, {name: "login select mode", template: "login", data: selection, mode: config.LoginModeSelect}, {name: "logged-out", template: "logged-out", data: loggedOutData{BasePath: basePath}}} {
+	}{{name: "login", template: "login", data: credentialForm, mode: config.LoginModePassword}, {name: "login select mode", template: "login", data: selection, mode: config.LoginModeSelect}, {name: "logged-out", template: "logged-out", data: loggedOutData{BasePath: basePath}}} {
 		var rendered bytes.Buffer
 		if err := templates.ExecuteTemplate(&rendered, check.template, check.data); err != nil {
 			return fmt.Errorf("execute %s.html: %w", check.name, err)
