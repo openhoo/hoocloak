@@ -90,10 +90,15 @@ func hashValue(input io.Reader, output io.Writer) error {
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(value), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
+			return errors.New("hash input exceeds bcrypt maximum length")
+		}
+		return errors.New("generate password hash failed")
 	}
-	_, err = fmt.Fprintln(output, string(hash))
-	return err
+	if _, err := fmt.Fprintln(output, string(hash)); err != nil {
+		return errors.New("write password hash failed")
+	}
+	return nil
 }
 
 func serve(path string, logger *slog.Logger) error {

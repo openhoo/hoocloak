@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,12 @@ import (
 	buildversion "github.com/openhoo/hoocloak/internal/version"
 )
 
+type echoingErrorWriter struct{}
+
+func (echoingErrorWriter) Write(value []byte) (int, error) {
+	return 0, errors.New(string(value))
+}
+
 func TestVersionCommand(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -21,6 +28,25 @@ func TestVersionCommand(t *testing.T) {
 	}
 	if got := strings.TrimSpace(output.String()); got != buildversion.Value {
 		t.Fatalf("version output = %q, want %q", got, buildversion.Value)
+	}
+}
+
+func TestHashValueDoesNotReturnPasswordDerivedErrors(t *testing.T) {
+	secret := strings.Repeat("s", 73)
+	err := hashValue(strings.NewReader(secret+"\n"), io.Discard)
+	if err == nil || err.Error() != "hash input exceeds bcrypt maximum length" {
+		t.Fatalf("hashValue() error = %v", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatal("hashValue() error contains password input")
+	}
+
+	err = hashValue(strings.NewReader("password\n"), echoingErrorWriter{})
+	if err == nil || err.Error() != "write password hash failed" {
+		t.Fatalf("hashValue() writer error = %v", err)
+	}
+	if strings.Contains(err.Error(), "$2") {
+		t.Fatal("hashValue() error contains generated password hash")
 	}
 }
 
