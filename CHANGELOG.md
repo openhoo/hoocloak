@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 2.0.4 (2026-08-30)
+
+### Bug Fixes
+
+- **security:** distinguish preflight fixture from credentials (#3) (41f842e)
+
 ## 2.0.3 (2026-08-30)
 
 ### Bug Fixes
