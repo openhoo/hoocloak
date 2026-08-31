@@ -1,5 +1,12 @@
 # hoocloak Changelog
 
+## 2.0.5 (2026-08-31)
+
+### Bug Fixes
+
+- align Hoostack policy and release supply chain (#4) (70dbc7c)
+- **release:** honor protected main branch (ee92fb4)
+
 ## 2.0.4 (2026-08-30)
 
 ### Bug Fixes
