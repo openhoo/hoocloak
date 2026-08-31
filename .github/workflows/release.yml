@@ -269,7 +269,13 @@ jobs:
           version: v4.2.3
 
       - name: Package chart
-        run: helm package charts/hoocloak --destination dist
+        run: |
+          set -euo pipefail
+          install -m 0644 LICENSE charts/hoocloak/LICENSE
+          helm package charts/hoocloak --destination dist
+          chart=(dist/*.tgz)
+          test "${#chart[@]}" -eq 1
+          tar -tzf "${chart[0]}" | grep -Fx 'hoocloak/LICENSE'
 
       - name: Upload packaged chart
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
