@@ -24,7 +24,7 @@ concurrency:
 
 env:
   BUN_VERSION: 1.3.14
-  HOOVERSION_VERSION: 1.0.6
+  HOOVERSION_VERSION: 1.0.7
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
   DOCKERHUB_IMAGE: openhoo/hoocloak
 
@@ -37,8 +37,7 @@ jobs:
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.event == 'push' &&
         github.event.workflow_run.head_branch == 'main' &&
-        github.event.workflow_run.head_repository.full_name == github.repository &&
-        !startsWith(github.event.workflow_run.head_commit.message, 'chore(release):')
+        github.event.workflow_run.head_repository.full_name == github.repository
       )
     runs-on: ubuntu-latest
     permissions:
@@ -157,14 +156,27 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
-      - name: Release
-        id: release
-        if: (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') && steps.manual_prerequisite.outputs.resume != 'true'
-        uses: openhoo/hooversion/actions/release@528576f6fbc6136ec5f76ac53bf81d3e04aca4b3 # v1.0.6
+      - name: Prepare protected-branch release
+        id: prepare_release
+        if: >-
+          (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') &&
+          steps.manual_prerequisite.outputs.resume != 'true' &&
+          (github.event_name == 'workflow_dispatch' || !startsWith(github.event.workflow_run.head_commit.message, 'chore(release):'))
+        uses: openhoo/hooversion/actions/prepare-release@d536bb45b5c2dbf9a17c866c0fe48f54216a1673 # v1.0.7
         with:
           version: ${{ env.HOOVERSION_VERSION }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+      - name: Finalize protected-branch release
+        id: release
+        if: >-
+          steps.current.outputs.current == 'true' &&
+          startsWith(github.event.workflow_run.head_commit.message, 'chore(release):')
+        uses: openhoo/hooversion/actions/release@d536bb45b5c2dbf9a17c866c0fe48f54216a1673 # v1.0.7
+        with:
+          version: ${{ env.HOOVERSION_VERSION }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           github: false
 
       - name: Resolve publication metadata
@@ -173,8 +185,8 @@ jobs:
         env:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
           HOOVERSION_PUBLISHED: ${{ steps.release.outputs.published }}
-          HOOVERSION_TAG: ${{ steps.release.outputs.tag }}
-          HOOVERSION_VERSION: ${{ steps.release.outputs.version }}
+          HOOVERSION_TAG: ${{ steps.release.outputs.tag || steps.prepare_release.outputs.tag }}
+          HOOVERSION_VERSION: ${{ steps.release.outputs.version || steps.prepare_release.outputs.version }}
           MANUAL_RESUME: ${{ steps.manual_prerequisite.outputs.resume }}
           MANUAL_RESUME_TAG: ${{ steps.manual_prerequisite.outputs.tag }}
           MANUAL_RESUME_VERSION: ${{ steps.manual_prerequisite.outputs.version }}
