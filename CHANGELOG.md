@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 2.0.6 (2026-08-31)
+
+### Bug Fixes
+
+- **release:** embed license in Helm chart (#7) (91acdb3)
+
 ## 2.0.5 (2026-08-31)
 
 ### Bug Fixes
