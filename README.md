@@ -571,7 +571,14 @@ After successful CI on `main`, Hooversion derives the next semantic version:
 
 Hooversion updates [`internal/version/version`](internal/version/version) and [`CHANGELOG.md`](CHANGELOG.md). Its Bun 1.3.14 `afterVersion` hook runs [`scripts/sync-chart-version.ts`](scripts/sync-chart-version.ts), synchronizing chart `version` and `appVersion`. It creates `chore(release): hoocloak <version>` and Git tag `v<version>`; release commits do not recursively trigger another release.
 
-Publication attaches `hoocloak-<version>.tgz` to the GitHub Release and pushes identical multi-platform images to `ghcr.io/openhoo/hoocloak` and `openhoo/hoocloak` with tags `<version>`, `<major>.<minor>`, `sha-<first-7-release-commit-chars>`, and `latest`. Images use Zstandard layers, maximum BuildKit provenance, and SBOM attestations. GitHub artifact attestation is generated and pushed for the GHCR image subject only; the Docker Hub image receives the shared BuildKit provenance/SBOM but not that separate GitHub artifact-attestation record.
+Publication attaches `hoocloak-<version>.tgz`, sorted SHA-256 checksums, and
+keyless Sigstore bundles to the GitHub Release; those assets also receive GitHub
+artifact attestations. It pushes identical multi-platform images to
+`ghcr.io/openhoo/hoocloak` and `openhoo/hoocloak` with tags `<version>`,
+`<major>.<minor>`, `sha-<first-7-release-commit-chars>`, and `latest`.
+Images use Zstandard layers, maximum BuildKit provenance, and SBOM attestations.
+Both registry digests are signed with Cosign. A GitHub artifact attestation is
+additionally pushed for the GHCR image subject.
 
 Docker Hub publication requires repository secrets for a username and token. The token must permit image push to `openhoo/hoocloak` and public-repository reads, which BuildKit's SBOM scanner pull requires. Never document or commit their values.
 
@@ -579,4 +586,4 @@ A manually dispatched release defaults to `dry_run=true`, which previews Hoovers
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)
