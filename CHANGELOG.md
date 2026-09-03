@@ -1,5 +1,16 @@
 # hoocloak Changelog
 
+## 2.0.7 (2026-09-03)
+
+### Bug Fixes
+
+- **release:** eliminate persistent candidate tags (d45e09f)
+
+### Other Changes
+
+- **ci:** update Hoostack tool pins (#9) (6a8de53)
+- **ci:** adopt HooNeedsUpdates v0.3.0 (1e0dc35)
+
 ## 2.0.6 (2026-08-31)
 
 ### Bug Fixes
