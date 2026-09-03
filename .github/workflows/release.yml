@@ -24,7 +24,7 @@ concurrency:
 
 env:
   BUN_VERSION: 1.3.14
-  HOOVERSION_VERSION: 1.1.0
+  HOOVERSION_VERSION: 1.1.1
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
   DOCKERHUB_IMAGE: openhoo/hoocloak
 
@@ -162,7 +162,7 @@ jobs:
           (steps.current.outputs.current == 'true' || steps.manual_current.outputs.current == 'true') &&
           steps.manual_prerequisite.outputs.resume != 'true' &&
           (github.event_name == 'workflow_dispatch' || !startsWith(github.event.workflow_run.head_commit.message, 'chore(release):'))
-        uses: openhoo/hooversion/actions/prepare-release@f2186561c587b58c5ea08c74c15800cdd39eab42 # v1.1.0
+        uses: openhoo/hooversion/actions/prepare-release@ac503b23b9b36ebbf39ee6103713c81f1f18b64d # v1.1.1
         with:
           version: ${{ env.HOOVERSION_VERSION }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -173,7 +173,7 @@ jobs:
         if: >-
           steps.current.outputs.current == 'true' &&
           startsWith(github.event.workflow_run.head_commit.message, 'chore(release):')
-        uses: openhoo/hooversion/actions/release@f2186561c587b58c5ea08c74c15800cdd39eab42 # v1.1.0
+        uses: openhoo/hooversion/actions/release@ac503b23b9b36ebbf39ee6103713c81f1f18b64d # v1.1.1
         with:
           version: ${{ env.HOOVERSION_VERSION }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -320,24 +320,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Derive image tags and labels
+      - name: Derive image labels
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: |
             ${{ env.GHCR_IMAGE }}
             ${{ env.DOCKERHUB_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}},value=${{ needs.release.outputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.version }}
-            type=raw,value=sha-${{ needs.release.outputs.short_sha }}
-            type=raw,value=latest
           labels: |
             org.opencontainers.image.revision=${{ needs.release.outputs.commit }}
             org.opencontainers.image.version=${{ needs.release.outputs.version }}
             org.opencontainers.image.licenses=Apache-2.0
 
-      - name: Build and push image
+      - name: Build and push digest-only image
         id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -346,12 +341,10 @@ jobs:
           cache-to: type=gha,mode=max,scope=hoocloak-image
           context: .
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,compression=zstd,compression-level=19,force-compression=true
+          outputs: type=image,"name=${{ env.GHCR_IMAGE }},${{ env.DOCKERHUB_IMAGE }}",compression=zstd,compression-level=19,force-compression=true,name-canonical=true,push-by-digest=true,push=true
           platforms: linux/amd64,linux/arm64
           provenance: mode=max
           sbom: true
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
 
       - name: Verify compressed platform images
         env:
@@ -360,6 +353,7 @@ jobs:
           INDEX_DIGEST: ${{ steps.push.outputs.digest }}
           MAX_COMPRESSED_SIZE: "5242880"
         run: |
+          set -euo pipefail
           mapfile -t platforms < <(
             docker buildx imagetools inspect --raw "${GHCR_IMAGE}@${INDEX_DIGEST}" |
               jq -r '.manifests[] | select(.platform.os == "linux") | "\(.platform.os)/\(.platform.architecture)"' |
@@ -399,6 +393,27 @@ jobs:
           set -euo pipefail
           cosign sign --yes "${GHCR_IMAGE}@${DIGEST}"
           cosign sign --yes "${DOCKERHUB_IMAGE}@${DIGEST}"
+
+      - name: Promote verified image digest
+        env:
+          GHCR_IMAGE: ${{ env.GHCR_IMAGE }}
+          DOCKERHUB_IMAGE: ${{ env.DOCKERHUB_IMAGE }}
+          INDEX_DIGEST: ${{ steps.push.outputs.digest }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          RELEASE_SHORT_SHA: ${{ needs.release.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          release_major="${RELEASE_VERSION%%.*}"
+          release_minor="${RELEASE_VERSION#*.}"
+          release_minor="${release_minor%%.*}"
+          minor="${release_major}.${release_minor}"
+          for image in "$GHCR_IMAGE" "$DOCKERHUB_IMAGE"; do
+            for tag in "$RELEASE_VERSION" "$minor" "sha-${RELEASE_SHORT_SHA}" latest; do
+              docker buildx imagetools create \
+                --tag "${image}:${tag}" \
+                "${image}@${INDEX_DIGEST}"
+            done
+          done
 
   publish-release:
     name: Publish GitHub Release

@@ -562,23 +562,40 @@ Chart checks are listed under [Chart maintainer checks](#chart-maintainer-checks
 
 ## Releases
 
-After successful CI on `main`, Hooversion derives the next semantic version:
+After successful push CI on `main`, the Release workflow asks Hooversion to
+prepare the next semantic version:
 
 - `feat:` creates a minor release.
 - `fix:` and `perf:` create a patch release.
 - `type!:` or a `BREAKING CHANGE:` footer creates a major release.
 - Other conventional types remain in history without forcing a release.
 
-Hooversion updates [`internal/version/version`](internal/version/version) and [`CHANGELOG.md`](CHANGELOG.md). Its Bun 1.3.14 `afterVersion` hook runs [`scripts/sync-chart-version.ts`](scripts/sync-chart-version.ts), synchronizing chart `version` and `appVersion`. It creates `chore(release): hoocloak <version>` and Git tag `v<version>`; release commits do not recursively trigger another release.
+The preparation run updates [`internal/version/version`](internal/version/version)
+and [`CHANGELOG.md`](CHANGELOG.md). Its Bun 1.3.14 `afterVersion` hook runs
+[`scripts/sync-chart-version.ts`](scripts/sync-chart-version.ts), synchronizing
+chart `version` and `appVersion`. Because `main` is protected, it pushes the
+generated `chore(release): hoocloak <version>` commit to
+`release/v<version>` and writes a compare URL in the workflow summary. A
+maintainer must open that URL as a release pull request and squash-merge it into
+`main` while preserving the generated commit's complete message: subject plus
+body/release notes. Retrieve the exact message with
+`git fetch origin release/v<version> && git show -s --format=%B origin/release/v<version>`
+and copy all of its output into the squash message. A title-only squash is not
+resumable and prevents publication after CI. After the landed release commit's
+push CI succeeds, the next Release workflow finalizes the exact `v<version>` tag;
+GitHub Release, chart, and image publication then proceed. Release commits do not
+recursively trigger another release.
 
 Publication attaches `hoocloak-<version>.tgz`, sorted SHA-256 checksums, and
 keyless Sigstore bundles to the GitHub Release; those assets also receive GitHub
-artifact attestations. It pushes identical multi-platform images to
-`ghcr.io/openhoo/hoocloak` and `openhoo/hoocloak` with tags `<version>`,
-`<major>.<minor>`, `sha-<first-7-release-commit-chars>`, and `latest`.
-Images use Zstandard layers, maximum BuildKit provenance, and SBOM attestations.
-Both registry digests are signed with Cosign. A GitHub artifact attestation is
-additionally pushed for the GHCR image subject.
+artifact attestations. It first pushes one untagged, digest-addressable
+multi-platform image to each of
+`ghcr.io/openhoo/hoocloak` and `openhoo/hoocloak`, verifies and signs that digest,
+then creates tags `<version>`, `<major>.<minor>`,
+`sha-<first-7-release-commit-chars>`, and `latest` from it. No transient candidate
+tags remain after publication. Images use Zstandard layers, maximum BuildKit
+provenance, and SBOM attestations. A GitHub artifact attestation is additionally
+pushed for the GHCR image subject.
 
 Docker Hub publication requires repository secrets for a username and token. The token must permit image push to `openhoo/hoocloak` and public-repository reads, which BuildKit's SBOM scanner pull requires. Never document or commit their values.
 
