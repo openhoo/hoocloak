@@ -7,6 +7,7 @@
     "e2e:password": "HOOCLOAK_LOGIN_MODE=password playwright test tests/e2e/hoocloak.spec.ts",
     "e2e:select": "HOOCLOAK_LOGIN_MODE=select playwright test tests/e2e/select.spec.ts",
     "e2e:server": "bash tests/e2e/server.sh",
+    "test:release-workflow": "node --test tests/release-workflow.test.mjs",
     "e2e:ui": "HOOCLOAK_LOGIN_MODE=password playwright test tests/e2e/hoocloak.spec.ts --ui"
   },
   "devDependencies": {

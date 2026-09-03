@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HOOVERSION_VERSION: 1.1.0
+  HOOVERSION_VERSION: 1.1.1
   KIND_VERSION: 0.32.0
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 0
 
       - name: Lint commits
-        uses: openhoo/hooversion/actions/lint@f2186561c587b58c5ea08c74c15800cdd39eab42 # v1.1.0
+        uses: openhoo/hooversion/actions/lint@ac503b23b9b36ebbf39ee6103713c81f1f18b64d # v1.1.1
         with:
           version: ${{ env.HOOVERSION_VERSION }}
 
@@ -312,10 +312,14 @@ jobs:
             --tag hoocloak-spa:dev \
             examples/react-spa
 
-      - name: Install E2E dependencies
-        run: |
-          npm ci --no-audit --no-fund
-          npx playwright install --with-deps chromium firefox webkit
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Test release workflow regression
+        run: npm run test:release-workflow
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
 
       - name: Test complete example stack
         run: npm run e2e
@@ -347,14 +351,14 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Enforce Hoolicy policy
-        uses: openhoo/hoolicy/actions/check@5b8cfb4339ba84edf96f84ddd66e30f4e19e7a80 # v0.3.0
+        uses: openhoo/hoolicy/actions/check@46529a99335938e7284f11099bf15f7e1800e6f5 # v0.3.1
         with:
-          version: 0.3.0
+          version: 0.3.1
 
       - name: Scan with Hooray
-        uses: openhoo/hooray/actions/scan@5849431da3a3fb503053d2f89282519797082074 # v0.6.4
+        uses: openhoo/hooray/actions/scan@f2b28d71398749142f4d9366b0427369f3af6e02 # v0.6.5
         with:
-          version: 0.6.4
+          version: 0.6.5
           policy: hooray-policy.yaml
           format: table
           output: ""
@@ -372,9 +376,9 @@ jobs:
           fail-on: none
 
       - name: Set up HooNeedsUpdates
-        uses: openhoo/hooneedsupdates/actions/setup@5f29337d0c39c47c691947aae0a201d2cfca8d64 # v0.3.0
+        uses: openhoo/hooneedsupdates/actions/setup@ffd31b013dafcd772bb067a0eec76f739ecd76a3 # v0.3.1
         with:
-          version: 0.3.0
+          version: 0.3.1
 
       - name: Audit dependency freshness
         run: hooneedsupdates scan --fail-on unresolved .
