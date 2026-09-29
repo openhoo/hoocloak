@@ -132,7 +132,7 @@ printf '%s\n' 'a-local-secret' | ./hoocloak hash
 | `realms[].clients[]` | no | Optional realm SPA and service clients; absent or empty is valid. |
 | `users[].id` | yes | Stable subject identifier; shares a per-realm namespace with client IDs. |
 | `users[].username` | yes | Password-login name; unique per realm after Unicode case folding. |
-| `users[].password_hash` | yes | Valid bcrypt hash, including when process-wide select mode is used. |
+| `users[].password_hash` | no | Valid bcrypt hash when set. Users without it sign in with the default password `hoo`. A configured hash takes precedence. |
 | `users[].name`, `email`, `email_verified` | no | Optional profile values. With the corresponding scope, empty or omitted `name`/`email` and false or omitted `email_verified` are left out of serialized UserInfo and ID-token claims; only non-zero configured values are emitted. |
 | `users[].roles`, `permissions` | no | Optional unique authorization values; absent or empty is valid. Permissions are custom OAuth scope tokens, never reserved OIDC scopes. |
 | `clients[].id`, `type` | yes | Stable client ID and either `spa` or `service`; ID shares the realm namespace with user IDs. |

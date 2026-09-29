@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openhoo/hoocloak/internal/config"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 )
 
@@ -371,6 +372,41 @@ func TestAuthenticationIntersectsClientAndUserScopes(t *testing.T) {
 	idScopes := client.RestrictAdditionalIdTokenScopes()([]string{"profile", "email", "api.read", "offline_access"})
 	if !slices.Equal(idScopes, []string{"profile", "email"}) {
 		t.Fatalf("additional ID-token scopes = %v", idScopes)
+	}
+}
+
+func TestAuthenticationUsesDefaultPasswordOnlyWithoutHash(t *testing.T) {
+	clock := &fakeClock{current: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	cfg := testConfig(t)
+	cfg.Realms[0].Users = append(cfg.Realms[0].Users, config.User{ID: "bob", Username: "bob"})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config with a user without a hash: %v", err)
+	}
+	store := NewStore(cfg.Realms[0], cfg.Tokens, "/realms/development", nil, "test-kid", clock)
+	for _, tt := range []struct {
+		name, username, password string
+		wantSuccess              bool
+	}{
+		{"default password", "bob", "hoo", true},
+		{"wrong default password", "bob", "other", false},
+		{"default password does not override hash", "alice", "hoo", false},
+		{"configured hash still works", "alice", "alice-password", true},
+		{"unknown user", "unknown", "hoo", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request := &AuthRequest{id: tt.name, clientID: "react-spa", expires: clock.Now().Add(5 * time.Minute)}
+			store.authRequests[request.id] = request
+			err := store.Authenticate(request.id, tt.username, tt.password)
+			if tt.wantSuccess && err != nil {
+				t.Fatalf("Authenticate() error = %v", err)
+			}
+			if !tt.wantSuccess && !errors.Is(err, errInvalidCredentials) {
+				t.Fatalf("Authenticate() error = %v, want invalid credentials", err)
+			}
+			if request.done != tt.wantSuccess {
+				t.Fatalf("request.done = %v, want %v", request.done, tt.wantSuccess)
+			}
+		})
 	}
 }
 func TestSelectIdentityCompletesAuthorizationWithoutPassword(t *testing.T) {
