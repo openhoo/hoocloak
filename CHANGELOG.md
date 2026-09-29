@@ -1,5 +1,15 @@
 # hoocloak Changelog
 
+## 2.1.0 (2026-09-29)
+
+### Features
+
+- **hoocloak:** allow default password for users without hash (#16) (6f871f8)
+
+### Other Changes
+
+- **ci:** adopt Hoonarqube v0.3.1 (f900f00)
+
 ## 2.0.7 (2026-09-03)
 
 ### Bug Fixes
