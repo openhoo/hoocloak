@@ -8,6 +8,7 @@
 
 ### Other Changes
 
+- **release:** tag the verified release commit without writing to protected `main`.
 - **ci:** adopt Hoonarqube v0.3.1 (f900f00)
 
 ## 2.0.7 (2026-09-03)

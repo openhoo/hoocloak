@@ -103,7 +103,7 @@ jobs:
           ci_sha="$current_main_sha"
           resume=false
 
-          if [ "$subject" = "$expected_subject" ]; then
+          if [[ "$subject" == "$expected_subject" || "$subject" == "$expected_subject (#"*")" ]]; then
             if ! git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"; then
               echo "::error::Existing release retry requires tag $tag, but it is missing from origin."
               exit 1
@@ -173,11 +173,41 @@ jobs:
         if: >-
           steps.current.outputs.current == 'true' &&
           startsWith(github.event.workflow_run.head_commit.message, 'chore(release):')
-        uses: openhoo/hooversion/actions/release@ac503b23b9b36ebbf39ee6103713c81f1f18b64d # v1.1.1
-        with:
-          version: ${{ env.HOOVERSION_VERSION }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          github: false
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < internal/version/version)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::internal/version/version contains invalid release version '$version'."
+            exit 1
+          fi
+          tag="v${version}"
+          commit="$(git rev-parse HEAD)"
+          subject="$(git log -1 --format=%s HEAD)"
+          expected_subject="chore(release): hoocloak ${version}"
+          if [[ "$subject" != "$expected_subject" && "$subject" != "$expected_subject (#"*")" ]]; then
+            echo "::error::Expected release commit subject $expected_subject, got $subject."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag -a "$tag" -m "Hoocloak ${version}" "$commit"
+            git push origin "refs/tags/${tag}"
+          fi
+          tag_commit="$(git rev-parse "${tag}^{commit}")"
+          if [ "$tag_commit" != "$commit" ]; then
+            echo "::error::Release tag $tag points to $tag_commit, not current HEAD $commit."
+            exit 1
+          fi
+          {
+            echo "commit=$commit"
+            echo "published=true"
+            echo "tag=$tag"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Resolve publication metadata
         id: metadata
@@ -218,7 +248,7 @@ jobs:
               exit 1
             fi
           elif [ "$MANUAL_RESUME" = "true" ]; then
-            if [ "$MANUAL_RESUME_VERSION" != "$version" ] || [ "$MANUAL_RESUME_TAG" != "$tag" ] || [ "$subject" != "$expected_subject" ]; then
+            if [ "$MANUAL_RESUME_VERSION" != "$version" ] || [ "$MANUAL_RESUME_TAG" != "$tag" ] || [[ "$subject" != "$expected_subject" && "$subject" != "$expected_subject (#"*")" ]]; then
               echo "::error::Manual release retry metadata no longer matches current release $tag at $commit."
               exit 1
             fi
