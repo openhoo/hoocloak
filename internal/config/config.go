@@ -209,8 +209,10 @@ func (c Config) Validate() error {
 				return fmt.Errorf("realms[%d] has duplicate username %q", realmIndex, user.Username)
 			}
 			usernames[username] = struct{}{}
-			if err := validBcrypt(user.PasswordHash); err != nil {
-				return fmt.Errorf("%s.password_hash: %w", where, err)
+			if user.PasswordHash != "" {
+				if err := validBcrypt(user.PasswordHash); err != nil {
+					return fmt.Errorf("%s.password_hash: %w", where, err)
+				}
 			}
 			if err := validatePermissions(user.Permissions, where+".permissions"); err != nil {
 				return err

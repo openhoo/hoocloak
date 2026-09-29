@@ -159,6 +159,26 @@ func TestLoadAcceptsSupportedBcryptMinorVersions(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsUsersWithoutPasswordHash(t *testing.T) {
+	t.Parallel()
+	for _, passwordHashLine := range []string{"", "        password_hash: \"\"\n"} {
+		configYAML := strings.Replace(validConfigYAML,
+			"        password_hash: \"$2a$10$vWq8DjfdBvihgDARWb4jaOyhhRpU6Vgygi49GnwKTTVP45M8nPylW\"\n",
+			passwordHashLine, 1)
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(configYAML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Realms[0].Users[0].PasswordHash != "" {
+			t.Fatal("user unexpectedly has a password hash")
+		}
+	}
+}
+
 func TestValidateOriginAcceptsCanonicalForms(t *testing.T) {
 	t.Parallel()
 	for _, origin := range []string{
