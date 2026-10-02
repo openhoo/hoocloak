@@ -20,6 +20,7 @@ flowchart LR
 ## Navigation
 
 - [Quick start](#quick-start)
+- [Agent skills](#agent-skills)
 - [Prerequisites](#prerequisites)
 - [CLI reference](#cli-reference)
 - [Configuration](#configuration)
@@ -32,6 +33,32 @@ flowchart LR
 - [Contributing](#contributing)
 - [Releases](#releases)
 - [License](#license)
+
+## Agent skills
+
+Two installable skills serve different tasks:
+
+- [`hoocloak-integration`](skills/hoocloak-integration/SKILL.md) helps agents
+  configure Hoocloak and connect your application's SPA, API, or service account.
+- [`hoocloak-development`](skills/hoocloak-development/SKILL.md) helps agents
+  change and verify Hoocloak itself. Repository agents find it through `AGENTS.md`
+  and `.agents/skills`.
+
+Install the integration skill from your application's directory:
+
+```bash
+npx skills add openhoo/hoocloak --skill hoocloak-integration
+```
+
+To install the contributor skill elsewhere, select `--skill hoocloak-development`.
+Add `--global` for installation across projects; otherwise installation is
+project-scoped. The installer lets you select your supported coding agent.
+Skills contain instructions and bundled references; install/run the provider
+separately using the quick start below.
+
+From a local checkout, you can also install unpublished changes by passing its
+path instead of `openhoo/hoocloak`, for example:
+`npx skills add ./hoocloak --skill hoocloak-integration` from the parent directory.
 
 ## Quick start
 

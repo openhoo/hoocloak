@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hoocloak Integration"
+  short_description: "Connect applications to local Hoocloak OIDC"
+  default_prompt: "Use $hoocloak-integration to connect this application to Hoocloak and verify its authentication flow."

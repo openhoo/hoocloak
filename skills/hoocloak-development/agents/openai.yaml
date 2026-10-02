@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hoocloak Development"
+  short_description: "Develop and verify the Hoocloak provider"
+  default_prompt: "Use $hoocloak-development to implement and verify this change in the Hoocloak source repository."
