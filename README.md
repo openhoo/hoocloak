@@ -110,7 +110,7 @@ Docker Compose quick start does **not** require a host Go, Node, .NET, Helm, or 
 
 | Work | Required tools |
 |---|---|
-| Provider source | Go 1.26.x |
+| Provider source | Go 1.26.9 or newer |
 | Login UI, React example, or Playwright | Node.js 24.x and npm |
 | ASP.NET API source | .NET SDK 10 |
 | Chart development | Helm 4.2.3 and `kubectl` |
@@ -251,7 +251,7 @@ Every endpoint below is relative to `/realms/{realm}` unless marked root-only.
 | `/healthz` | Any | Root-only liveness response; the current handler does not restrict the HTTP method. `/realms/{realm}/healthz` is intentionally 404. |
 | `/ready` | Any | Root-only readiness across configured realm stores; the current handler does not restrict the HTTP method. `/realms/{realm}/ready` is intentionally 404. |
 
-Token, introspection, and revocation endpoints are POST-only. Security-sensitive scalar parameters on authorize, token, introspection, revocation, end-session, and hosted-login submissions may occur only once. Applicable form bodies are capped at 64 KiB.
+Token, introspection, and revocation endpoints are POST-only. Security-sensitive scalar parameters on authorize, token, introspection, revocation, end-session, and hosted-login submissions may occur only once. Applicable form bodies are capped at 64 KiB. Introspection and service revocation require HTTP Basic and reject form/query secrets, client assertions, and mixed Basic/form client identities; public SPA revocation uses only its `client_id` and token.
 
 ### Scopes and claims
 
@@ -274,7 +274,7 @@ Token, introspection, and revocation endpoints are POST-only. Security-sensitive
 ### Authorization, refresh, logout, and revocation state
 
 - Authorization requests and their codes share a five-minute lifetime. `prompt=none` returns `login_required` because Hoocloak has no provider SSO cookie.
-- A failed code exchange caused by a bad verifier, client, or redirect does not consume the code, so the correct exchange may be retried. A successful exchange is exact-once; concurrent valid redemption permits only one success.
+- A failed code exchange caused by a bad verifier, client, or redirect does not consume the code, so the correct exchange may be retried. PKCE verifiers must contain 43–128 ASCII letters, digits, or `-._~`. A successful exchange is exact-once; concurrent valid redemption permits only one success.
 - Refresh-family lifetime is absolute and non-sliding: rotation never extends the deadline created at first issuance. Each refresh token is single-use. Reusing an ancestor revokes the family.
 - Successful rotation removes the predecessor access token's provider metadata. Family replay, revocation, or end-session removes family access metadata, causing userinfo/introspection to reject it immediately.
 - End-session is scoped to the verified ID-token subject plus client. Revocation and introspection are restricted to the owning client. Revocation uses a submitted access/refresh token and client authentication rules; it does **not** use the logout ID-token hint.
@@ -514,9 +514,9 @@ themes/aurora/
 
 Asset names such as `theme.css`, `theme.js`, or `logo.svg` are illustrative; any files below `assets/` are served at `{{.BasePath}}/assets/`. No executable bit is required.
 
-Both templates are Go `html/template` files. `logged-out.html` receives only `.BasePath` and must keep login/assets URLs realm-relative. `login.html` receives `.BasePath`, `.RequestID`, `.Client`, `.CSRF`, `.Mode`, `.Username`, `.SelectedID`, `.Identities`, and `.Error`. Startup preflight renders password mode, select mode, and logged-out mode and rejects root-relative `/login` or `/assets/` references.
+Both templates are Go `html/template` files. `logged-out.html` receives only `.BasePath` and must keep login/assets URLs realm-relative. `login.html` receives `.BasePath`, `.RequestID`, `.Client`, `.CSRF`, `.Mode`, `.Username`, `.SelectedID`, `.Identities`, and `.Error`. Startup preflight renders both initial and retry pages in password and select modes, plus the logged-out page, and rejects root-relative `/login` or `/assets/` references. `assets/` must be a directory.
 
-The rendered login page must contain exactly one POST form, with action exactly `{{.BasePath}}/login`; nested or additional POST forms fail preflight. It must contain exactly one hidden `authRequestID` and one hidden `csrf`. Security-sensitive controls (`authRequestID`, `csrf`, `identity`, `username`, `password`) may not be duplicated. Password mode requires a `username` control and a `password` control with `type=password`; select mode requires an `identity` control. Realm CSP blocks cross-origin scripts, styles, images, and fonts, plus inline scripts and styles. `form-action` allows `'self'` and the configured SPA redirect origins.
+The rendered login page must contain exactly one POST form, with action exactly `{{.BasePath}}/login`; nested or additional POST forms fail preflight. It must contain exactly one hidden `authRequestID` input and one hidden `csrf` input. Security-sensitive controls (`authRequestID`, `csrf`, `identity`, `username`, `password`) may not be duplicated and must be enabled controls that submit one scalar value. Password mode requires a `username` control and a password input with `type=password`; select mode requires an `identity` control, with at least one enabled, nonempty option when using a single select. Buttons, checkboxes, multiple selects, and inert template content cannot supply mandatory fields. Realm CSP blocks cross-origin scripts, styles, images, and fonts, plus inline scripts and styles. `form-action` allows `'self'` and the configured SPA redirect origins.
 
 Compose can layer the read-only theme override without rebuilding the image:
 

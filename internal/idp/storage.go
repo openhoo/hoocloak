@@ -704,7 +704,7 @@ func (s *Store) KeySet(context.Context) ([]op.Key, error) {
 func (s *Store) GetClientByClientID(_ context.Context, id string) (op.Client, error) {
 	client := s.clients[id]
 	if client == nil {
-		return nil, fmt.Errorf("client %q not found", id)
+		return nil, oidc.ErrInvalidClient().WithDescription("client is not registered")
 	}
 	return client, nil
 }

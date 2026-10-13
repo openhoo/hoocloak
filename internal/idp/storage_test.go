@@ -3,8 +3,11 @@ package idp
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"slices"
 	"sync"
 	"testing"
@@ -30,6 +33,27 @@ func newTestStore(t testing.TB, clock Clock) *Store {
 	t.Helper()
 	cfg := testConfig(t)
 	return NewStore(cfg.Realms[0], cfg.Tokens, "/realms/development", nil, "test-kid", clock)
+}
+
+func TestUnknownRefreshClientReturnsInvalidClient(t *testing.T) {
+	server := testServer(t, nil)
+	for _, clientID := range []string{"unknown-client", ""} {
+		t.Run(clientID, func(t *testing.T) {
+			form := url.Values{
+				"grant_type": {"refresh_token"}, "refresh_token": {"invalid-token"}, "client_id": {clientID},
+			}
+			response := performRequest(server.Handler, http.MethodPost, "/oauth/token", form.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+			var body struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != http.StatusUnauthorized || body.Error != "invalid_client" {
+				t.Fatalf("unknown refresh client response = (%d, %q), want (401, invalid_client)", response.Code, body.Error)
+			}
+		})
+	}
 }
 
 func BenchmarkAuthRequestByIDWithActiveState(b *testing.B) {

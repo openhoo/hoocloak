@@ -8,7 +8,7 @@ description: Develop, debug, and test Hoocloak itself, including its Go OIDC pro
 Run commands from the Hoocloak repository root. Read `CONTRIBUTING.md` before
 changing public contracts. Versions and commands in `go.mod`, lockfiles,
 `package.json`, and `.github/workflows/ci.yml` take precedence over this guide.
-CI currently uses Go 1.26.6, Node 24, and Helm 4.2.3; release tooling uses Bun.
+CI currently uses Go 1.26.9, Node 24, and Helm 4.2.3; release tooling uses Bun.
 
 ## Find the implementation
 
