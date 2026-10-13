@@ -326,3 +326,124 @@ test("resource server rejects cross-realm tokens and the wrong hoocloak-api audi
   });
   expect(wrongAudienceProfile.status()).toBe(401);
 });
+
+test("mobile password login works with the keyboard and stays within the viewport", async ({
+  page,
+  browserName,
+  browserMonitor: _browserMonitor,
+}, testInfo) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "No development identity is active" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  await page.getByRole("button", { name: "Sign in with Hoocloak" }).click();
+  await expect(page.getByLabel("Username")).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  // WebKit's screenshot preparation injects an inline `body {}` stylesheet,
+  // which the application's strict CSP rejects. Capture Chromium/Firefox while
+  // keeping WebKit's console checks strict for the actual user flow.
+  if (browserName !== "webkit") {
+    const screenshot = testInfo.outputPath("mobile-password-login.png");
+    await page.screenshot({ path: screenshot, fullPage: true, caret: "initial" });
+    await testInfo.attach("mobile password login", { path: screenshot, contentType: "image/png" });
+  }
+
+  await page.keyboard.type("bob");
+  await page.keyboard.press("Tab");
+  await expect(page.getByLabel("Password")).toBeFocused();
+  await page.keyboard.type("bob-password");
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(`${app}/`);
+  await expect(page.getByLabel("Current session")).toContainText("Bob Reader");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  await callEndpoint(page, "/api/profile", 200);
+  if (browserName !== "webkit") {
+    const sessionScreenshot = testInfo.outputPath("mobile-session.png");
+    await page.screenshot({ path: sessionScreenshot, fullPage: true, caret: "initial" });
+    await testInfo.attach("mobile authenticated session", { path: sessionScreenshot, contentType: "image/png" });
+  }
+});
+
+test("sign-in preserves a same-origin deep link and removes OIDC callback parameters", async ({
+  page,
+  browserMonitor: _browserMonitor,
+}) => {
+  await page.goto("/inspect?view=profile#claims");
+  await page.getByRole("button", { name: "Sign in with Hoocloak" }).click();
+  await page.getByLabel("Username").fill("alice");
+  await page.getByLabel("Password").fill("alice-password");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page).toHaveURL(`${app}/inspect?view=profile#claims`);
+  await expect(page.getByLabel("Current session")).toContainText("Alice Admin");
+  await page.reload();
+  await expect(page.getByLabel("Current session")).toContainText("Alice Admin");
+});
+
+test("API rejects the ID token and an access token with a tampered signature", async ({
+  page,
+  request,
+  browserMonitor: _browserMonitor,
+}) => {
+  await signIn(page, "alice", "alice-password");
+  const tokens = await page.evaluate(() => {
+    for (const value of Object.values(sessionStorage)) {
+      try {
+        const candidate = JSON.parse(value) as { access_token?: unknown; id_token?: unknown };
+        if (typeof candidate.access_token === "string" && typeof candidate.id_token === "string") {
+          return { access: candidate.access_token, id: candidate.id_token };
+        }
+      } catch {
+        // Ignore non-JSON application state.
+      }
+    }
+    throw new Error("OIDC tokens were not found in session storage");
+  });
+  const idResponse = await request.get(`${api}/api/profile`, {
+    headers: { Authorization: `Bearer ${tokens.id}` },
+  });
+  expect(idResponse.status()).toBe(401);
+  const segments = tokens.access.split(".");
+  segments[2] = `${segments[2][0] === "A" ? "B" : "A"}${segments[2].slice(1)}`;
+  const tamperedResponse = await request.get(`${api}/api/profile`, {
+    headers: { Authorization: `Bearer ${segments.join(".")}` },
+  });
+  expect(tamperedResponse.status()).toBe(401);
+});
+
+test("a failed manual renewal shows an error and permits a fresh sign-in", async ({
+  page,
+  browserMonitor,
+}) => {
+  await signIn(page, "alice", "alice-password");
+  browserMonitor.expectHttpError(400, `${issuer}/oauth/token`);
+  await page.route(`${issuer}/oauth/token`, async (route) => {
+    await route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "invalid_grant", error_description: "The refresh token is no longer active." }),
+    });
+  }, { times: 1 });
+  await page.getByRole("button", { name: "Renew token" }).click();
+  await expect(page.getByRole("alert")).toContainText("Authentication did not complete");
+  await page.getByRole("button", { name: "Start a new sign-in" }).click();
+  await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
+  await page.getByLabel("Username").fill("bob");
+  await page.getByLabel("Password").fill("bob-password");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByLabel("Current session")).toContainText("Bob Reader");
+});
+
+test("an invalid callback reports the state failure and permits a fresh sign-in", async ({
+  page,
+  browserMonitor: _browserMonitor,
+}) => {
+  await page.goto("/auth/callback?code=untrusted&state=missing");
+  await expect(page.getByRole("alert")).toContainText("Authentication did not complete");
+  await page.getByRole("button", { name: "Start a new sign-in" }).click();
+  await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
+  await page.getByLabel("Username").fill("alice");
+  await page.getByLabel("Password").fill("alice-password");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page).toHaveURL(`${app}/`);
+  await expect(page.getByLabel("Current session")).toContainText("Alice Admin");
+});

@@ -456,6 +456,12 @@ footer {
   }
 }
 
+@media (max-width: 24rem) {
+  h1 {
+    font-size: 2.5rem;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

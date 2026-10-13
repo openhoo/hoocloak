@@ -233,8 +233,12 @@ func loadUI(themeDir string) (*template.Template, fs.FS, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open assets: %w", err)
 	}
-	if _, err := fs.Stat(assets, "."); err != nil {
+	assetInfo, err := fs.Stat(assets, ".")
+	if err != nil {
 		return nil, nil, fmt.Errorf("open assets: %w", err)
+	}
+	if !assetInfo.IsDir() {
+		return nil, nil, errors.New("open assets: assets must be a directory")
 	}
 	if err := preflightUITemplates(templates); err != nil {
 		return nil, nil, err
@@ -254,12 +258,22 @@ func preflightUITemplates(templates *template.Template) error {
 		Mode: config.LoginModeSelect, SelectedID: identity.ID, Error: "select a valid identity",
 		Identities: []loginIdentity{identity},
 	}
+	initialCredentials := credentialForm
+	initialCredentials.Username, initialCredentials.Error = "", ""
+	initialSelection := selection
+	initialSelection.SelectedID, initialSelection.Error = "", ""
 	for _, check := range []struct {
 		name     string
 		template string
 		data     any
 		mode     string
-	}{{name: "login", template: "login", data: credentialForm, mode: config.LoginModePassword}, {name: "login select mode", template: "login", data: selection, mode: config.LoginModeSelect}, {name: "logged-out", template: "logged-out", data: loggedOutData{BasePath: basePath}}} {
+	}{
+		{name: "login", template: "login", data: credentialForm, mode: config.LoginModePassword},
+		{name: "login initial", template: "login", data: initialCredentials, mode: config.LoginModePassword},
+		{name: "login select mode", template: "login", data: selection, mode: config.LoginModeSelect},
+		{name: "login select mode initial", template: "login", data: initialSelection, mode: config.LoginModeSelect},
+		{name: "logged-out", template: "logged-out", data: loggedOutData{BasePath: basePath}},
+	} {
 		var rendered bytes.Buffer
 		if err := templates.ExecuteTemplate(&rendered, check.template, check.data); err != nil {
 			return fmt.Errorf("execute %s.html: %w", check.name, err)
@@ -279,8 +293,8 @@ func preflightUITemplates(templates *template.Template) error {
 }
 
 type loginControlValidation struct {
-	kind  string
-	value string
+	tag, kind, value string
+	enabledOptions   int
 }
 
 type loginFieldsetValidation struct {
@@ -396,6 +410,12 @@ func (w *browserHTMLWalker) next() (xhtml.TokenType, string, map[string]string, 
 		w.truncateForeign()
 		namespace = nsHTML
 	}
+	// HTML ignores the self-closing flag on non-void elements. In particular,
+	// <template/> opens an inert template rather than exposing its contents.
+	// SVG and MathML still honor the flag, including their root elements.
+	if tokenType == xhtml.SelfClosingTagToken && namespace == nsHTML && name != "svg" && name != "math" && !isVoidHTMLElement(name) {
+		tokenType = xhtml.StartTagToken
+	}
 	foreign := namespace != nsHTML
 	if tokenType != xhtml.SelfClosingTagToken {
 		switch namespace {
@@ -452,6 +472,24 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 	}
 	walker := newBrowserHTMLWalker(document)
 	scopes := []loginFormScope{{postForm: -1}}
+	selectControl := ""
+	optionGroupDisabled := false
+	optionControl := ""
+	optionEligible, optionHasValue := false, false
+	optionScript := false
+	optionValue := ""
+	var optionText strings.Builder
+	finishOption := func() {
+		if optionEligible && ((optionHasValue && optionValue != "") || (!optionHasValue && strings.TrimSpace(optionText.String()) != "")) {
+			control := validation.controls[optionControl]
+			control.enabledOptions++
+			validation.controls[optionControl] = control
+		}
+		optionControl, optionValue = "", ""
+		optionEligible, optionHasValue = false, false
+		optionScript = false
+		optionText.Reset()
+	}
 	for {
 		tokenType, name, attributes, err := walker.next()
 		if tokenType == xhtml.ErrorToken {
@@ -464,6 +502,9 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 			return fmt.Errorf("parse rendered HTML: %w", err)
 		}
 		if tokenType != xhtml.StartTagToken && tokenType != xhtml.SelfClosingTagToken && tokenType != xhtml.EndTagToken {
+			if tokenType == xhtml.TextToken && optionEligible && !optionScript && !scopes[len(scopes)-1].inert {
+				optionText.Write(walker.tokenizer.Text())
+			}
 			continue
 		}
 		closing := tokenType == xhtml.EndTagToken
@@ -473,7 +514,9 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 					scopes = scopes[:len(scopes)-1]
 				}
 			} else if tokenType != xhtml.SelfClosingTagToken {
-				inert := scopes[len(scopes)-1].inert || (strings.ToLower(attributes["shadowrootmode"]) != "open" && strings.ToLower(attributes["shadowrootmode"]) != "closed")
+				// A select cannot host a declarative shadow root, so its template
+				// options remain inert even when shadowrootmode is present.
+				inert := scopes[len(scopes)-1].inert || selectControl != "" || (strings.ToLower(attributes["shadowrootmode"]) != "open" && strings.ToLower(attributes["shadowrootmode"]) != "closed")
 				scopes = append(scopes, loginFormScope{postForm: -1, inert: inert})
 			}
 			continue
@@ -483,6 +526,18 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 			continue
 		}
 		if closing {
+			if name == "script" {
+				optionScript = false
+			}
+			if name == "option" || name == "optgroup" || name == "select" {
+				finishOption()
+			}
+			if name == "select" {
+				selectControl = ""
+				optionGroupDisabled = false
+			} else if name == "optgroup" {
+				optionGroupDisabled = false
+			}
 			match := -1
 			for index := len(validation.elements) - 1; index >= 0; index-- {
 				if validation.elements[index] == name {
@@ -533,6 +588,25 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 		if name == "fieldset" {
 			_, disabled := attributes["disabled"]
 			validation.fieldsets = append(validation.fieldsets, loginFieldsetValidation{depth: len(validation.elements), disabled: disabled, legendDepth: -1})
+		}
+		if selectControl != "" {
+			switch name {
+			case "script":
+				// Browsers exclude script descendants from an option's fallback
+				// value, while preserving genuine text before and after them.
+				optionScript = optionControl != ""
+			case "select", "input", "textarea":
+				return fmt.Errorf("login form %s select must not contain %s controls", selectControl, name)
+			case "optgroup":
+				finishOption()
+				_, optionGroupDisabled = attributes["disabled"]
+			case "option":
+				finishOption()
+				_, disabled := attributes["disabled"]
+				optionControl = selectControl
+				optionEligible = !disabled && !optionGroupDisabled
+				optionValue, optionHasValue = attributes["value"]
+			}
 		}
 		if name == "form" {
 			if len(scope.forms) > 0 {
@@ -606,14 +680,37 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 							return fmt.Errorf("login form must not contain duplicate %s controls", controlName)
 						}
 					}
+					if name == "button" {
+						return fmt.Errorf("login form %s must be a successful control without a submitter", controlName)
+					}
+					if name == "input" {
+						switch strings.ToLower(attributes["type"]) {
+						case "button", "reset", "submit", "image", "file", "checkbox":
+							return fmt.Errorf("login form %s must be a successful scalar control", controlName)
+						case "radio":
+							if _, checked := attributes["checked"]; !checked {
+								return fmt.Errorf("login form %s control must be checked", controlName)
+							}
+						}
+					}
+					if name == "select" {
+						if _, multiple := attributes["multiple"]; multiple {
+							return fmt.Errorf("login form %s select must not allow multiple values", controlName)
+						}
+					}
 				}
-				validation.controls[controlName] = loginControlValidation{kind: strings.ToLower(attributes["type"]), value: attributes["value"]}
+				validation.controls[controlName] = loginControlValidation{tag: name, kind: strings.ToLower(attributes["type"]), value: attributes["value"]}
+				if name == "select" && sensitive {
+					selectControl = controlName
+					optionGroupDisabled = false
+				}
 			}
 		}
 		if !isVoidHTMLElement(name) {
 			validation.elements = append(validation.elements, name)
 		}
 	}
+	finishOption()
 	for _, override := range validation.overrides {
 		owner := override.owner
 		if override.formID != "" {
@@ -648,7 +745,7 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 		value string
 	}{{name: "authRequestID", value: requestID}, {name: "csrf", value: csrf}} {
 		control := validation.controls[hidden.name]
-		if control.kind != "hidden" {
+		if control.tag != "input" || control.kind != "hidden" {
 			return fmt.Errorf("login form must contain hidden %s control", hidden.name)
 		}
 		if control.value != hidden.value {
@@ -659,11 +756,16 @@ func validateLoginHTML(document, basePath, mode, requestID, csrf string) error {
 		if _, exists := validation.controls["username"]; !exists {
 			return errors.New("password login form must contain username control")
 		}
-		if validation.controls["password"].kind != "password" {
+		if control := validation.controls["password"]; control.tag != "input" || control.kind != "password" {
 			return errors.New("password login form must contain password control")
 		}
 	} else if _, exists := validation.controls["identity"]; !exists {
 		return errors.New("select login form must contain identity control")
+	}
+	for name, control := range validation.controls {
+		if control.tag == "select" && control.enabledOptions == 0 && (name == "username" || name == "identity") {
+			return fmt.Errorf("login form %s select must contain an enabled nonempty option", name)
+		}
 	}
 	return nil
 }
@@ -970,6 +1072,9 @@ func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 			if !rejectRepeatedFormParameters(w, r, "token", "token_type_hint", "client_id", "client_secret") {
 				return
 			}
+			if !s.mutationClientAuthenticationGate(w, r) {
+				return
+			}
 		case "/userinfo":
 			if r.Method == http.MethodPost {
 				if err := r.ParseForm(); err != nil {
@@ -998,6 +1103,30 @@ func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+func (s *realmServer) mutationClientAuthenticationGate(w http.ResponseWriter, r *http.Request) bool {
+	for _, field := range []string{"client_secret", "client_assertion", "client_assertion_type"} {
+		if _, exists := r.Form[field]; exists {
+			oauthError(w, http.StatusUnauthorized, "invalid_client", "client credentials must use HTTP Basic authentication", true)
+			return false
+		}
+	}
+	if _, exists := r.Form["client_id"]; exists {
+		client := s.Store.clients[r.Form.Get("client_id")]
+		if r.URL.Path == "/revoke" && r.Header.Get("Authorization") == "" && client != nil && client.config.Type == config.ClientTypeSPA {
+			return true
+		}
+		oauthError(w, http.StatusUnauthorized, "invalid_client", "client credentials must use HTTP Basic authentication", true)
+		return false
+	}
+	id, secret, ok := r.BasicAuth()
+	if !ok || id == "" || secret == "" {
+		oauthError(w, http.StatusUnauthorized, "invalid_client", "client credentials must use HTTP Basic authentication", true)
+		return false
+	}
+	return true
+}
+
 func (s *realmServer) callbackGate(w http.ResponseWriter, r *http.Request) bool {
 	requestID := r.URL.Query().Get("id")
 	if requestID == "" {
@@ -1112,6 +1241,22 @@ func rejectRepeatedFormParameters(w http.ResponseWriter, r *http.Request, parame
 	return true
 }
 
+func validCodeVerifier(value string) bool {
+	if len(value) < 43 || len(value) > 128 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') &&
+			character != '-' && character != '.' && character != '_' && character != '~' {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *realmServer) tokenGate(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return true
@@ -1121,6 +1266,10 @@ func (s *realmServer) tokenGate(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	if !rejectRepeatedFormParameters(w, r, "grant_type", "code", "client_id", "client_secret", "redirect_uri", "code_verifier", "refresh_token", "scope") {
+		return false
+	}
+	if r.Form.Get("grant_type") == "authorization_code" && !validCodeVerifier(r.Form.Get("code_verifier")) {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "code_verifier must contain 43 to 128 ASCII unreserved characters", false)
 		return false
 	}
 	if r.Form.Get("grant_type") != "client_credentials" {

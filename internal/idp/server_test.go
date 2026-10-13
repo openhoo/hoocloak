@@ -539,7 +539,7 @@ func TestLogoutGateRejectsDuplicateSecurityParameters(t *testing.T) {
 
 func TestFailedAuthorizationCodeExchangeCanRetry(t *testing.T) {
 	server := testServer(t, nil)
-	verifier := "correct-verifier"
+	verifier := strings.Repeat("correct-verifier-", 3)
 	digest := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
 	request := &AuthRequest{
@@ -560,7 +560,7 @@ func TestFailedAuthorizationCodeExchangeCanRetry(t *testing.T) {
 		return performRequest(server.Handler, http.MethodPost, "/oauth/token", form.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
 	}
 	for _, failed := range []struct{ name, verifier, clientID, redirectURI string }{
-		{name: "verifier", verifier: "wrong-verifier", clientID: "react-spa", redirectURI: request.redirectURI},
+		{name: "verifier", verifier: strings.Repeat("wrong-verifier-", 4), clientID: "react-spa", redirectURI: request.redirectURI},
 		{name: "client", verifier: verifier, clientID: "missing-client", redirectURI: request.redirectURI},
 		{name: "redirect", verifier: verifier, clientID: "react-spa", redirectURI: "http://app.localhost:5173/wrong"},
 	} {
@@ -1270,7 +1270,7 @@ func TestApplicationRouterAndRealmIsolation(t *testing.T) {
 	if err := partnerSigned.Claims(developmentJWKS.Keys[0].Key, &jwt.Claims{}); err == nil {
 		t.Fatal("partner token verified with development JWKS")
 	}
-	verifier := "interactive-verifier"
+	verifier := strings.Repeat("interactive-verifier-", 3)
 	digest := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
 	interactive := func(realm, password, redirect string) (string, string) {
