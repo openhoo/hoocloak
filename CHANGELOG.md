@@ -1,5 +1,15 @@
 # hoocloak Changelog
 
+## 2.1.1 (2026-10-13)
+
+### Bug Fixes
+
+- **hoocloak:** harden protocol and theme validation (1b69384)
+
+### Other Changes
+
+- **hoocloak:** add contributor and consumer agent skills (#19) (0e28e61)
+
 ## 2.1.0 (2026-09-29)
 
 ### Features
