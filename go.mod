@@ -3,7 +3,7 @@ module github.com/openhoo/hoocloak
 go 1.26.9
 
 require (
-	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-jose/go-jose/v4 v4.1.7
 	github.com/rs/cors v1.11.1
 	github.com/zitadel/oidc/v3 v3.48.0
 	go.yaml.in/yaml/v3 v3.0.4
