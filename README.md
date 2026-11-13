@@ -110,7 +110,7 @@ Docker Compose quick start does **not** require a host Go, Node, .NET, Helm, or 
 
 | Work | Required tools |
 |---|---|
-| Provider source | Go 1.26.9 or newer |
+| Provider source | Go 1.27.4 or newer |
 | Login UI, React example, or Playwright | Node.js 24.x and npm |
 | ASP.NET API source | .NET SDK 10 |
 | Chart development | Helm 4.2.3 and `kubectl` |
