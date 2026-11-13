@@ -1,5 +1,12 @@
 # hoocloak Changelog
 
+## 2.1.2 (2026-11-13)
+
+### Bug Fixes
+
+- **hoocloak:** apply dependency and toolchain updates (3a996f9)
+- **hoocloak:** finish dependency and security updates (2a45fe9)
+
 ## 2.1.1 (2026-10-13)
 
 ### Bug Fixes
