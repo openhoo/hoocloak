@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd AS login
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS login
 WORKDIR /src/ui/login
 COPY ui/login/package.json ui/login/package-lock.json ./
 RUN --mount=type=cache,id=hoocloak-npm,target=/root/.npm,sharing=locked npm ci --no-audit --no-fund
