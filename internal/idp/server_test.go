@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -102,6 +103,7 @@ func testServerWithConfig(t testing.TB, cfg config.Config, clock Clock) *realmSe
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
+	t.Cleanup(func() { _ = application.Close() })
 	realm := application.realms["development"]
 	realm.Handler = realmPathAdapter(application.Handler, realm.basePath)
 	return realm
@@ -199,6 +201,9 @@ func TestDiscoveryAdvertisesOnlyImplementedProtocol(t *testing.T) {
 	assertStrings("response_types_supported", []string{"code"})
 	assertStrings("grant_types_supported", []string{"authorization_code", "refresh_token", "client_credentials"})
 	assertStrings("code_challenge_methods_supported", []string{"S256"})
+	if metadata["request_uri_parameter_supported"] != false {
+		t.Fatal("discovery must explicitly disable request_uri")
+	}
 	assertStrings("id_token_signing_alg_values_supported", []string{"RS256"})
 	assertStrings("token_endpoint_auth_methods_supported", []string{"none", "client_secret_basic"})
 	for _, forbidden := range []string{"device_authorization_endpoint", "registration_endpoint", "request_parameter_supported", "check_session_iframe"} {
@@ -450,17 +455,13 @@ func TestAuthorizeGateRejectsDuplicateSecurityParameters(t *testing.T) {
 		"redirect_uri": {"http://app.localhost:5173/auth/callback"}, "code_challenge": {testCodeChallenge}, "code_challenge_method": {"S256"},
 		"state": {"state-value"}, "nonce": {"nonce-value"},
 	}
-	for _, parameter := range []string{"client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method", "state", "nonce"} {
+	for _, parameter := range []string{"client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method", "state", "nonce", "prompt", "max_age", "request", "id_token_hint"} {
 		t.Run("GET "+parameter, func(t *testing.T) {
 			query := make(url.Values, len(valid))
 			for key, values := range valid {
 				query[key] = slices.Clone(values)
 			}
-			if parameter == "response_mode" {
-				query[parameter] = []string{"query", "form_post"}
-			} else {
-				query.Add(parameter, "attacker-value")
-			}
+			query[parameter] = []string{"first", "second"}
 			assertInvalidAuthorizeRequest(t, performRequest(server.Handler, http.MethodGet, "/authorize?"+query.Encode(), "", nil))
 		})
 		t.Run("POST query-body mismatch "+parameter, func(t *testing.T) {
@@ -468,8 +469,8 @@ func TestAuthorizeGateRejectsDuplicateSecurityParameters(t *testing.T) {
 			for key, values := range valid {
 				body[key] = slices.Clone(values)
 			}
-			if parameter == "response_mode" {
-				body.Set(parameter, "query")
+			if !body.Has(parameter) {
+				body.Set(parameter, "first")
 			}
 			assertInvalidAuthorizeRequest(t, performRequest(server.Handler, http.MethodPost, "/authorize?"+url.Values{parameter: {"attacker-value"}}.Encode(), body.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}))
 		})
@@ -930,24 +931,39 @@ func TestLoginRejectsDuplicateSecurityParameters(t *testing.T) {
 	if len(cookies) != 1 {
 		t.Fatalf("GET login set %d cookies", len(cookies))
 	}
+	for _, extra := range []string{"authRequestID=request-id", "username=fixture"} {
+		response := performRequest(server.Handler, http.MethodGet, "/login?authRequestID=request-id&"+extra, "", nil)
+		if response.Code != http.StatusBadRequest || len(response.Result().Cookies()) != 0 {
+			t.Errorf("unexpected login page for %s: status %d, cookies %d", extra, response.Code, len(response.Result().Cookies()))
+		}
+	}
 	valid := url.Values{"authRequestID": {"request-id"}, "csrf": {cookies[0].Value}, "identity": {"alice"}, "username": {"alice"}, "password": {"wrong-password"}}
+	checkPost := func(t *testing.T, query, form url.Values) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/login?"+query.Encode(), strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.AddCookie(cookies[0])
+		response := httptest.NewRecorder()
+		server.Handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", response.Code)
+		}
+	}
 	for _, parameter := range []string{"authRequestID", "csrf", "identity", "username", "password"} {
-		t.Run(parameter, func(t *testing.T) {
-			form := make(url.Values, len(valid)+1)
-			for key, values := range valid {
-				form[key] = slices.Clone(values)
-			}
-			form.Add(parameter, "attacker-value")
-			request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
-			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			request.AddCookie(cookies[0])
-			response := httptest.NewRecorder()
-			server.Handler.ServeHTTP(response, request)
-			if response.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400; body=%s", response.Code, response.Body.String())
-			}
+		t.Run("body/"+parameter, func(t *testing.T) {
+			form := maps.Clone(valid)
+			form[parameter] = []string{valid.Get(parameter), "second"}
+			checkPost(t, nil, form)
+		})
+		t.Run("query/"+parameter, func(t *testing.T) {
+			checkPost(t, url.Values{parameter: {"fixture"}}, valid)
 		})
 	}
+	t.Run("field supplied only in URL", func(t *testing.T) {
+		form := maps.Clone(valid)
+		form.Del("identity")
+		checkPost(t, url.Values{"identity": {"alice"}}, form)
+	})
 }
 func TestConfiguredRedirectOriginsCanonicalizeCSPHosts(t *testing.T) {
 	tests := []struct {
@@ -1521,9 +1537,11 @@ func TestExternalLoginThemeRejectsDuplicateSensitiveControls(t *testing.T) {
 
 func TestExternalLoginThemeAcceptsValidDualModeForms(t *testing.T) {
 	themeDir := writeExternalTheme(t, `{{if eq .Mode "select"}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><select name="identity"><option value="user-id">Example User</option></select></form>{{else}}<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf"><input name="username"><input name="password" type="password"></form>{{end}}`)
-	if _, _, err := loadUI(themeDir); err != nil {
+	_, assets, err := loadUI(themeDir)
+	if err != nil {
 		t.Fatalf("loadUI() error = %v", err)
 	}
+	t.Cleanup(func() { _ = assets.(externalThemeAssets).Close() })
 }
 
 func TestProviderEndpointPolicyAndThemeAssetConfine(t *testing.T) {

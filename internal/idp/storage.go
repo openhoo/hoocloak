@@ -38,6 +38,9 @@ var (
 )
 
 func compareCredential(hash, secret string) (bool, error) {
+	if len(secret) > config.MaxBcryptInputBytes {
+		return false, nil
+	}
 	select {
 	case credentialHashSlots <- struct{}{}:
 		defer func() { <-credentialHashSlots }()
@@ -100,8 +103,8 @@ type refreshRecord struct {
 type refreshFamily struct {
 	id, clientID, subject string
 	expires               time.Time
-	revoked               bool
-	// tokens is the family's refresh-token index used by revoke and expiry cleanup.
+	// Index active and consumed hashes until the family's absolute expiry.
+	// This keeps both replay detection and removal local to this family.
 	tokens [][32]byte
 }
 
@@ -195,17 +198,6 @@ func (s *Store) pruneLocked(now time.Time) {
 			continue
 		}
 		consider(record.expires)
-	}
-	// Consumed refresh records survive only for replay detection; reclaim
-	// them once their family is gone or expired.
-	for hash, record := range s.refresh {
-		if !record.consumed {
-			continue
-		}
-		if family := s.families[record.familyID]; family != nil && now.Before(family.expires) {
-			continue
-		}
-		delete(s.refresh, hash)
 	}
 	for id, family := range s.families {
 		if !now.Before(family.expires) {
@@ -528,6 +520,8 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 	if err := s.reserveAuthorizationCodeLocked(request); err != nil {
 		return "", "", time.Time{}, err
 	}
+	scopes := request.GetScopes()
+	refreshScopes := scopes
 	var family *refreshFamily
 	if current == "" {
 		familyID, e := randomID()
@@ -543,23 +537,26 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 	} else {
 		oldHash := sha256.Sum256([]byte(current))
 		old := s.refresh[oldHash]
-		if old == nil || old.consumed {
-			if old != nil {
-				s.revokeFamilyLocked(old.familyID)
-			}
+		if old == nil || old.clientID != clientID {
 			return "", "", time.Time{}, oidc.ErrInvalidGrant()
 		}
 		family = s.families[old.familyID]
-		if family == nil || family.revoked || !now.Before(family.expires) || old.clientID != clientID {
+		rotation, ok := request.(*RefreshRequest)
+		if !ok || family == nil || rotation.familyID != family.id || rotation.subject != family.subject {
 			return "", "", time.Time{}, oidc.ErrInvalidGrant()
 		}
+		if old.consumed {
+			s.revokeFamilyLocked(old.familyID)
+			return "", "", time.Time{}, oidc.ErrInvalidGrant()
+		}
+		// RFC 6749 section 6: a narrower access token does not alter
+		// the scope of the refresh token that replaces its predecessor.
+		refreshScopes = old.scopes
 		delete(s.access, consumeRefreshRecord(old))
-		s.compactFamilyTokensLocked(family)
 	}
 	audience := slices.Clone(s.clients[clientID].config.Audiences)
-	scopes := request.GetScopes()
 	subject := request.GetSubject()
-	record := &refreshRecord{familyID: family.id, clientID: clientID, subject: subject, audience: audience, scopes: scopes, amr: amr, authTime: authTime, accessID: accessID}
+	record := &refreshRecord{familyID: family.id, clientID: clientID, subject: subject, audience: audience, scopes: refreshScopes, amr: amr, authTime: authTime, accessID: accessID}
 	family.tokens = append(family.tokens, newHash)
 	s.refresh[newHash] = record
 	s.access[accessID] = accessRecord{id: accessID, clientID: clientID, subject: subject, audience: slices.Clone(audience), scopes: slices.Clone(scopes), expires: expires, issuedAt: now, authTime: authTime, amr: slices.Clone(amr), familyID: family.id}
@@ -567,14 +564,23 @@ func (s *Store) CreateAccessAndRefreshTokens(_ context.Context, request op.Token
 	return accessID, newToken, expires, nil
 }
 
-func (s *Store) TokenRequestByRefreshToken(_ context.Context, token string) (op.RefreshTokenRequest, error) {
+// The provider's refresh lookup takes only the token. Carry the public client
+// ID checked by the HTTP gate so ownership is known before replay has effects.
+type refreshClientKey struct{}
+
+func withRefreshClient(ctx context.Context, clientID string) context.Context {
+	return context.WithValue(ctx, refreshClientKey{}, clientID)
+}
+
+func (s *Store) TokenRequestByRefreshToken(ctx context.Context, token string) (op.RefreshTokenRequest, error) {
+	clientID, _ := ctx.Value(refreshClientKey{}).(string)
 	hash := sha256.Sum256([]byte(token))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	s.pruneLocked(now)
 	record := s.refresh[hash]
-	if record == nil {
+	if record == nil || clientID == "" || record.clientID != clientID {
 		return nil, op.ErrInvalidRefreshToken
 	}
 	family := s.families[record.familyID]
@@ -582,7 +588,7 @@ func (s *Store) TokenRequestByRefreshToken(_ context.Context, token string) (op.
 		s.revokeFamilyLocked(record.familyID)
 		return nil, oidc.ErrInvalidGrant()
 	}
-	if family == nil || family.revoked || !now.Before(family.expires) {
+	if family == nil {
 		return nil, oidc.ErrInvalidGrant()
 	}
 	return &RefreshRequest{clientID: record.clientID, subject: record.subject, audience: slices.Clone(record.audience), scopes: slices.Clone(record.scopes), amr: slices.Clone(record.amr), authTime: record.authTime, familyID: record.familyID}, nil
@@ -596,31 +602,14 @@ func consumeRefreshRecord(record *refreshRecord) string {
 	return accessID
 }
 
-// compactFamilyTokensLocked drops consumed entries from the family token
-// index; replay detection consults s.refresh directly and pruneLocked
-// reclaims consumed records when their family ends.
-func (s *Store) compactFamilyTokensLocked(family *refreshFamily) {
-	live := family.tokens[:0]
-	for _, hash := range family.tokens {
-		if record := s.refresh[hash]; record != nil && !record.consumed {
-			live = append(live, hash)
-		}
-	}
-	family.tokens = live
-}
-
 func (s *Store) revokeFamilyLocked(id string) {
 	family := s.families[id]
 	if family == nil {
 		return
 	}
-	family.revoked = true
-	for hash, record := range s.refresh {
-		if record.familyID != id {
-			continue
-		}
-		if !record.consumed {
-			delete(s.access, consumeRefreshRecord(record))
+	for _, hash := range family.tokens {
+		if record := s.refresh[hash]; record != nil && !record.consumed {
+			delete(s.access, record.accessID)
 		}
 		delete(s.refresh, hash)
 	}
@@ -636,22 +625,15 @@ func (s *Store) TerminateSession(_ context.Context, userID, clientID string) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(s.now())
-	families := make(map[string]struct{})
 	for id, record := range s.access {
 		if record.subject == userID && record.clientID == clientID {
 			delete(s.access, id)
-			if record.familyID != "" {
-				families[record.familyID] = struct{}{}
-			}
 		}
 	}
 	for id, family := range s.families {
 		if family.subject == userID && family.clientID == clientID {
-			families[id] = struct{}{}
+			s.revokeFamilyLocked(id)
 		}
-	}
-	for id := range families {
-		s.revokeFamilyLocked(id)
 	}
 	return nil
 }
@@ -666,18 +648,20 @@ func (s *Store) GetRefreshTokenInfo(_ context.Context, clientID, token string) (
 		return "", "", op.ErrInvalidRefreshToken
 	}
 	family := s.families[record.familyID]
-	if record.clientID != clientID || record.consumed || family == nil || family.revoked {
+	if record.clientID != clientID || record.consumed || family == nil {
 		return "", "", op.ErrInvalidRefreshToken
 	}
 	return record.subject, token, nil
 }
 
-func (s *Store) RevokeToken(_ context.Context, tokenOrID, _ string, clientID string) *oidc.Error {
+func (s *Store) RevokeToken(_ context.Context, tokenOrID, subject string, clientID string) *oidc.Error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(s.now())
-	if access := s.access[tokenOrID]; access.id != "" {
-		if access.clientID == clientID {
+	// The provider passes an access token's ID and subject after verifying
+	// its signature. An unrecognized input is passed verbatim, with no subject.
+	if access, ok := s.access[tokenOrID]; ok {
+		if subject != "" && access.subject == subject && access.clientID == clientID {
 			delete(s.access, tokenOrID)
 			if access.familyID != "" {
 				s.revokeFamilyLocked(access.familyID)

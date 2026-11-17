@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "react-oidc-context";
-import { apiBase, safeReturnTo } from "./auth";
+import { apiBase } from "./auth";
+import { safeReturnTo } from "./returnTo";
 
 type ApiResult = {
   status: number | "Network error";
@@ -36,7 +37,8 @@ export default function App() {
   useEffect(() => {
     const onSilentRenewError = (error: Error) => {
       const errorCode = "error" in error && typeof error.error === "string" ? error.error : "";
-      if (errorCode !== "login_required" && !error.message.includes("login_required")) return;
+      const needsLogin = errorCode === "invalid_grant" || errorCode === "login_required" || error.message.includes("login_required");
+      if (!needsLogin) return;
 
       auth.stopSilentRenew();
       setSilentRenewNeedsLogin(true);
@@ -95,9 +97,10 @@ export default function App() {
     setActionError(null);
     setPendingAction("renew");
     try {
-      await auth.signinSilent();
-      setSilentRenewNeedsLogin(false);
-      removedStaleUser.current = false;
+      if (await auth.signinSilent()) {
+        setSilentRenewNeedsLogin(false);
+        removedStaleUser.current = false;
+      }
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "The session could not be renewed.");
     } finally {
@@ -140,6 +143,7 @@ export default function App() {
 
   const debugClaims = decodeDebugClaims(auth.user?.access_token);
   const callbackInProgress = auth.isLoading || auth.activeNavigator !== undefined;
+  const signedOutAfterRenewal = silentRenewNeedsLogin && !auth.isAuthenticated && auth.error?.source === "renewSilent";
 
   return (
     <main className="shell">
@@ -166,7 +170,7 @@ export default function App() {
             <p>The callback is being verified and the tab session is being restored.</p>
           </div>
         </section>
-      ) : auth.error ? (
+      ) : auth.error && !signedOutAfterRenewal ? (
         <section className="status-panel status-panel--error" role="alert">
           <div>
             <h2>Authentication did not complete</h2>

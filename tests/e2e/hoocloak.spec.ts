@@ -410,6 +410,29 @@ test("API rejects the ID token and an access token with a tampered signature", a
   expect(tamperedResponse.status()).toBe(401);
 });
 
+test("automatic renewal clears a revoked tab session and offers sign-in again", async ({
+  page, request, browserMonitor,
+}) => {
+  await signIn(page, "alice", "alice-password");
+  await expect(page.getByLabel("Current session")).toContainText("Alice Admin");
+  const key = `oidc.user:${issuer}:react-spa`;
+  const refresh = await page.evaluate((key) => {
+    const user = JSON.parse(sessionStorage.getItem(key)!) as { refresh_token: string; expires_at: number };
+    // Bring the browser's renewal timer forward; revocation below is real.
+    user.expires_at = Math.floor(Date.now() / 1000) + 30;
+    sessionStorage.setItem(key, JSON.stringify(user));
+    return user.refresh_token;
+  }, key);
+  const revoked = await request.post(`${issuer}/revoke`, {
+    form: { client_id: "react-spa", token: refresh, token_type_hint: "refresh_token" },
+  });
+  expect(revoked.ok()).toBe(true);
+  browserMonitor.expectHttpError(400, `${issuer}/oauth/token`);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Sign in again" })).toBeVisible();
+  expect(await page.evaluate((key) => sessionStorage.getItem(key), key)).toBeNull();
+});
+
 test("a failed manual renewal shows an error and permits a fresh sign-in", async ({
   page,
   browserMonitor,

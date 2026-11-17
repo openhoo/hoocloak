@@ -1,4 +1,5 @@
 import type { AuthProviderProps } from "react-oidc-context";
+import { safeReturnTo } from "./returnTo";
 import {
   UserManager,
   WebStorageStateStore,
@@ -76,20 +77,6 @@ function isLocalHost(hostname: string): boolean {
 
 const authority = readAuthority("VITE_OIDC_AUTHORITY", import.meta.env.VITE_OIDC_AUTHORITY);
 export const apiBase = readOrigin("VITE_API_BASE_URL", import.meta.env.VITE_API_BASE_URL);
-
-export function safeReturnTo(value: unknown): string {
-  if (
-    typeof value !== "string" ||
-    !value.startsWith("/") ||
-    value.startsWith("//") ||
-    value.includes("\\")
-  ) {
-    return "/";
-  }
-
-  const resolved = new URL(value, window.location.origin);
-  return resolved.origin === window.location.origin ? `${resolved.pathname}${resolved.search}${resolved.hash}` : "/";
-}
 
 function stateReturnTo(state: unknown): string {
   if (typeof state !== "object" || state === null || !("returnTo" in state)) {

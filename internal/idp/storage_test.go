@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/openhoo/hoocloak/internal/config"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type fakeClock struct {
@@ -150,7 +152,7 @@ func BenchmarkRefreshTokenLifecycle(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		request, err := store.TokenRequestByRefreshToken(context.Background(), refreshToken)
+		request, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), refreshToken)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -511,7 +513,7 @@ func TestRefreshRotationAndAncestorReplayRevokesFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create refresh family: %v", err)
 	}
-	rotationRequest, err := store.TokenRequestByRefreshToken(context.Background(), firstRefresh)
+	rotationRequest, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), firstRefresh)
 	if err != nil {
 		t.Fatalf("read first refresh token: %v", err)
 	}
@@ -525,13 +527,21 @@ func TestRefreshRotationAndAncestorReplayRevokesFamily(t *testing.T) {
 	if _, exists := store.access[firstAccess]; exists {
 		t.Fatal("rotation left predecessor access metadata active")
 	}
-	if _, err := store.TokenRequestByRefreshToken(context.Background(), secondRefresh); err != nil {
+	if _, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), secondRefresh); err != nil {
 		t.Fatalf("successor was not active before replay: %v", err)
 	}
-	if _, err := store.TokenRequestByRefreshToken(context.Background(), firstRefresh); err == nil {
+	for _, ctx := range []context.Context{t.Context(), withRefreshClient(t.Context(), "another-spa")} {
+		if _, err := store.TokenRequestByRefreshToken(ctx, firstRefresh); err == nil {
+			t.Fatal("lookup without the owning client succeeded")
+		}
+	}
+	if _, err := store.TokenRequestByRefreshToken(withRefreshClient(t.Context(), "react-spa"), secondRefresh); err != nil {
+		t.Fatal("an unbound or foreign lookup changed the owner's refresh family")
+	}
+	if _, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), firstRefresh); err == nil {
 		t.Fatal("consumed ancestor replay unexpectedly succeeded")
 	}
-	if _, err := store.TokenRequestByRefreshToken(context.Background(), secondRefresh); err == nil {
+	if _, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), secondRefresh); err == nil {
 		t.Fatal("successor remained usable after ancestor replay")
 	}
 	if _, exists := store.access[secondAccess]; exists {
@@ -558,11 +568,11 @@ func TestRefreshReuseAfterTwoSuccessfulLookupsRevokesSuccessor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstLookup, err := store.TokenRequestByRefreshToken(context.Background(), firstRefresh)
+	firstLookup, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), firstRefresh)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondLookup, err := store.TokenRequestByRefreshToken(context.Background(), firstRefresh)
+	secondLookup, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), firstRefresh)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +583,7 @@ func TestRefreshReuseAfterTwoSuccessfulLookupsRevokesSuccessor(t *testing.T) {
 	if _, _, _, err := store.CreateAccessAndRefreshTokens(context.Background(), secondLookup, firstRefresh); err == nil {
 		t.Fatal("second prevalidated refresh exchange succeeded")
 	}
-	if _, err := store.TokenRequestByRefreshToken(context.Background(), successorRefresh); err == nil {
+	if _, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), successorRefresh); err == nil {
 		t.Fatal("successor refresh token remained usable after reuse")
 	}
 	if _, exists := store.access[successorAccess]; exists {
@@ -604,7 +614,17 @@ func TestRevocationDeletesRefreshFamilyState(t *testing.T) {
 		t.Fatalf("refresh revocation retained state: families=%d refresh=%d access=%d", len(store.families), len(store.refresh), len(store.access))
 	}
 	access, _ = newFamily(t)
-	if err := store.RevokeToken(context.Background(), access, "", "react-spa"); err != nil {
+	for _, principal := range []struct{ subject, client string }{
+		{"", "react-spa"}, {"different-user", "react-spa"}, {"alice", "different-client"},
+	} {
+		if err := store.RevokeToken(t.Context(), access, principal.subject, principal.client); err != nil {
+			t.Fatal("revocation disclosed an unknown or foreign token")
+		}
+		if _, ok := store.access[access]; !ok {
+			t.Fatal("access record removed without a matching verified subject and client")
+		}
+	}
+	if err := store.RevokeToken(context.Background(), access, "alice", "react-spa"); err != nil {
 		t.Fatal(err)
 	}
 	if len(store.families) != 0 || len(store.refresh) != 0 || len(store.access) != 0 {
@@ -651,7 +671,7 @@ func TestRefreshFamilyUsesNonSlidingAbsoluteExpiry(t *testing.T) {
 	}
 
 	clock.Advance(7 * time.Hour)
-	rotationRequest, err := store.TokenRequestByRefreshToken(context.Background(), firstRefresh)
+	rotationRequest, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), firstRefresh)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +684,7 @@ func TestRefreshFamilyUsesNonSlidingAbsoluteExpiry(t *testing.T) {
 	}
 
 	clock.Advance(time.Hour)
-	if _, err := store.TokenRequestByRefreshToken(context.Background(), successor); err == nil {
+	if _, err := store.TokenRequestByRefreshToken(withRefreshClient(context.Background(), "react-spa"), successor); err == nil {
 		t.Fatal("refresh successor remained active at absolute family expiry")
 	}
 	if _, exists := store.families[familyID]; exists {
@@ -748,6 +768,27 @@ func TestAuthenticationRechecksExpiryAfterPasswordVerification(t *testing.T) {
 		t.Fatal("expired authorization request was marked complete")
 	}
 }
+
+func TestCredentialComparisonUsesWholeValue(t *testing.T) {
+	value := strings.Repeat("é", 36) // 72 bytes
+	hash, err := bcrypt.GenerateFromPassword([]byte(value), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		input string
+		match bool
+	}{
+		{value, true},
+		{value + "x", false},
+		{strings.Repeat("é", 35), false},
+	} {
+		if match, err := compareCredential(string(hash), tc.input); err != nil || match != tc.match {
+			t.Errorf("credential of %d bytes: match=%t, err=%v; want %t", len(tc.input), match, err, tc.match)
+		}
+	}
+}
+
 func TestCredentialCheckSlotsRejectAndRelease(t *testing.T) {
 	testConfig(t)
 	for len(credentialHashSlots) < cap(credentialHashSlots) {

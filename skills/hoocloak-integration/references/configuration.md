@@ -52,6 +52,10 @@ Reserved supported scopes are `openid`, `profile`, `email`, `offline_access`.
 tokens and must not reuse reserved names. Service clients forbid reserved scopes.
 Refresh families have an absolute configured lifetime; rotation does not extend
 it. Serialize refresh requests and discard consumed tokens immediately.
+A client may request fewer scopes for a single access token on refresh. The
+replacement refresh token retains the original grant. Send token and revocation
+parameters in the form-encoded POST body and send a bearer token to UserInfo in
+the Authorization header.
 
 ## Diagnose by evidence
 

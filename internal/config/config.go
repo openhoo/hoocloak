@@ -26,6 +26,9 @@ const (
 	ClientTypeService = "service"
 	LoginModePassword = "password"
 	LoginModeSelect   = "select"
+	// Bcrypt's key schedule uses at most 72 bytes. Enforce the same limit
+	// when reading a new credential and when checking an existing one.
+	MaxBcryptInputBytes = 72
 )
 
 func CanonicalUsername(value string) string {

@@ -94,6 +94,8 @@ jobs:
           helm lint charts/hoocloak --strict
           helm template hoocloak charts/hoocloak --namespace hoocloak > /dev/null
           helm template hoocloak charts/hoocloak --namespace hoocloak \
+            --set-json 'hoocloakConfig.realms=[{"name":"empty"}]' > /dev/null
+          helm template hoocloak charts/hoocloak --namespace hoocloak \
             --set existingConfigSecret=hoocloak-config \
             --set existingConfigSecretKey=provider.yaml \
             --set-string existingConfigSecretVersion=1 > /dev/null
@@ -317,6 +319,9 @@ jobs:
 
       - name: Test release workflow regression
         run: npm run test:release-workflow
+
+      - name: Test example SPA callback paths
+        run: npm --prefix examples/react-spa test
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium firefox webkit
