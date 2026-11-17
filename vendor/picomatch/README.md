@@ -12,7 +12,7 @@ copies keep the provider and standalone SPA Docker contexts independent.
 - npm upstream archive SHA-512 (SRI):
   `sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==`
 - Checked-in backport archive SHA-256:
-  `113bac57b424013739ae73691c4ec49dca2e195b6a6d151b2a164de12ff221e2`
+  `7016f8511a4399159fa74f6ffb078e934ffa282088507cf81fbace525f18103f`
 
 To inspect or repack from the repository root:
 
@@ -27,7 +27,8 @@ work=$(mktemp -d)
   tar -xzf picomatch-4.0.7.tgz &&
   cd package &&
   git apply "$repo/vendor/picomatch/GHSA-fc5q-39xc-vjpf.patch" &&
-  npm pkg set name=@hoocloak/picomatch version=4.0.7-hoocloak.1 private=true &&
+  npm pkg set name=@hoocloak/picomatch version=4.0.7-hoocloak.1 &&
+  npm pkg set private=true --json &&
   npm pack --ignore-scripts --pack-destination ..
 )
 ```
