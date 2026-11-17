@@ -13,18 +13,22 @@ export E2E_SPA_ORIGIN="${E2E_SPA_ORIGIN:-http://localhost:${E2E_SPA_PORT}}"
 E2E_CONFIG_PATH="$(mktemp "${TMPDIR:-/tmp}/${COMPOSE_PROJECT_NAME}.config.XXXXXX.yaml")"
 export E2E_CONFIG_PATH
 
+cleanup() {
+  local status=$?
+  docker compose -p "$COMPOSE_PROJECT_NAME" -f tests/e2e/compose.yaml down --volumes --remove-orphans --rmi local || status=1
+  rm -f "$E2E_CONFIG_PATH" || status=1
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 sed \
   -e "s/__E2E_PROVIDER_PORT__/${E2E_PROVIDER_PORT}/g" \
   -e "s/__E2E_SPA_PORT__/${E2E_SPA_PORT}/g" \
   tests/e2e/hoocloak.yaml >"$E2E_CONFIG_PATH"
 chmod 0644 "$E2E_CONFIG_PATH"
-
-cleanup() {
-  docker compose -p "$COMPOSE_PROJECT_NAME" -f tests/e2e/compose.yaml down --volumes --remove-orphans
-  rm -f "$E2E_CONFIG_PATH"
-}
-
-trap cleanup EXIT INT TERM
 
 if docker compose -p "$COMPOSE_PROJECT_NAME" -f tests/e2e/compose.yaml up --build --wait; then
   :

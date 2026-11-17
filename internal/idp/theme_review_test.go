@@ -1,6 +1,7 @@
 package idp
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,28 @@ import (
 
 	"github.com/openhoo/hoocloak/internal/config"
 )
+
+func TestAssetsStayInOpenedPublicDirectory(t *testing.T) {
+	theme := writeExternalTheme(t, reviewThemeForm)
+	assetsPath := filepath.Join(theme, "assets")
+	if err := os.WriteFile(filepath.Join(assetsPath, "brand.txt"), []byte("original branding"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, assets, err := loadUI(theme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = assets.(externalThemeAssets).Close() })
+	if err := os.Rename(assetsPath, filepath.Join(theme, "previous-assets")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(assetsPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := fs.ReadFile(assets, "brand.txt"); err != nil || string(got) != "original branding" {
+		t.Fatalf("asset no longer served from the opened directory: %q, %v", got, err)
+	}
+}
 
 const reviewThemeForm = `<form method="post" action="{{.BasePath}}/login"><input type="hidden" name="authRequestID"><input type="hidden" name="csrf">{{if eq .Mode "select"}}<select name="identity"><option value="user-id">User</option></select>{{else}}<input name="username"><input name="password" type="password">{{end}}</form>`
 

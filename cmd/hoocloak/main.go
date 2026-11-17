@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -73,26 +73,28 @@ func run(args []string, stdin io.Reader, stdout io.Writer, logger *slog.Logger) 
 }
 
 func hashValue(input io.Reader, output io.Writer) error {
-	reader := bufio.NewReader(input)
-	value, err := reader.ReadString('\n')
+	// The longest valid input is 72 bytes plus CRLF. Read one more byte
+	// to distinguish that exact input from a longer stream.
+	data, err := io.ReadAll(io.LimitReader(input, config.MaxBcryptInputBytes+3))
 	if err != nil {
-		return errors.New("hash input must be one newline-terminated value")
+		return errors.New("read hash input failed")
 	}
-	value = strings.TrimSuffix(value, "\n")
-	value = strings.TrimSuffix(value, "\r")
-	if value == "" {
-		return errors.New("hash input must not be empty")
-	}
-	if extra, err := io.ReadAll(reader); err != nil {
-		return err
-	} else if len(extra) != 0 {
+	line, extra, terminated := bytes.Cut(data, []byte{'\n'})
+	if len(extra) != 0 {
 		return errors.New("hash accepts exactly one value")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(value), bcrypt.DefaultCost)
+	value := bytes.TrimSuffix(line, []byte{'\r'})
+	if len(value) > config.MaxBcryptInputBytes {
+		return errors.New("hash input exceeds bcrypt maximum length")
+	}
+	if !terminated {
+		return errors.New("hash input must be one newline-terminated value")
+	}
+	if len(value) == 0 {
+		return errors.New("hash input must not be empty")
+	}
+	hash, err := bcrypt.GenerateFromPassword(value, bcrypt.DefaultCost)
 	if err != nil {
-		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
-			return errors.New("hash input exceeds bcrypt maximum length")
-		}
 		return errors.New("generate password hash failed")
 	}
 	if _, err := fmt.Fprintln(output, string(hash)); err != nil {
@@ -129,6 +131,7 @@ func serve(path string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer provider.Close()
 
 	httpServer := &http.Server{
 		Addr: cfg.Listen, Handler: provider.Handler, ReadHeaderTimeout: 5 * time.Second,
@@ -178,7 +181,7 @@ func health(args []string) error {
 		return errors.New("usage: hoocloak health [--url URL] [--timeout duration]")
 	}
 	parsed, err := url.Parse(*target)
-	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+	if err != nil || !parsed.IsAbs() || parsed.Hostname() == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return errors.New("health URL must be an absolute HTTP(S) URL without credentials")
 	}
 	client := &http.Client{

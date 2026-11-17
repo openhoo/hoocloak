@@ -12,6 +12,7 @@ import (
 
 	"github.com/openhoo/hoocloak/internal/config"
 	buildversion "github.com/openhoo/hoocloak/internal/version"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type echoingErrorWriter struct{}
@@ -47,6 +48,26 @@ func TestHashValueDoesNotReturnPasswordDerivedErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "$2") {
 		t.Fatal("hashValue() error contains generated password hash")
+	}
+}
+
+func TestHashValueReadsOneBoundedLine(t *testing.T) {
+	password := strings.Repeat("é", 36) // exactly 72 bytes
+	for _, ending := range []string{"\n", "\r\n"} {
+		var output bytes.Buffer
+		if err := hashValue(strings.NewReader(password+ending), &output); err != nil {
+			t.Fatal(err)
+		}
+		if err := bcrypt.CompareHashAndPassword(bytes.TrimSpace(output.Bytes()), []byte(password)); err != nil {
+			t.Fatal("hash did not match the complete input")
+		}
+	}
+	for _, prefix := range []string{"", "a\n"} {
+		input := strings.NewReader(prefix + strings.Repeat("x", 512))
+		size := input.Len()
+		if err := hashValue(input, io.Discard); err == nil || size-input.Len() > 75 {
+			t.Fatalf("invalid input: read %d bytes, err=%v", size-input.Len(), err)
+		}
 	}
 }
 
@@ -120,6 +141,10 @@ func TestHealthChecksStatusWithoutFollowingRedirects(t *testing.T) {
 }
 
 func TestHealthRejectsUnsafeURL(t *testing.T) {
+	err := health([]string{"--url", "http://:8080/ready"})
+	if err == nil || !strings.Contains(err.Error(), "absolute HTTP(S) URL") {
+		t.Fatal("health did not reject the missing hostname before making a request")
+	}
 	for _, target := range []string{"/ready", "file:///etc/passwd", "http://user:pass@localhost/ready"} {
 		if err := health([]string{"--url", target}); err == nil {
 			t.Fatalf("health(%q) unexpectedly succeeded", target)

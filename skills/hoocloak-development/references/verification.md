@@ -6,7 +6,8 @@ All paths and commands here are relative to the Hoocloak checkout root.
 
 `playwright.config.ts` allocates provider/API/SPA ports and a unique Compose
 project. `tests/e2e/server.sh` generates a temporary provider configuration,
-starts `tests/e2e/compose.yaml`, and removes its own stack on exit.
+starts `tests/e2e/compose.yaml`, and removes its containers, network, volumes,
+and project-specific image tags on exit. Docker's build cache is retained.
 Keep one worker: browser projects share provider state.
 
 For independent runs with manually coordinated ports, supply all three distinct
@@ -15,6 +16,8 @@ For independent runs with manually coordinated ports, supply all three distinct
 The Docker daemon must be able to bind-mount the generated config. Use the
 package scripts to obtain the supported orchestration. `PW_REUSE_SERVER=1`
 transfers state, mode, port, and cleanup responsibility to the caller.
+
+The example SPA's callback path tests run with `npm --prefix examples/react-spa test` on Node 24.
 
 ## Charts and Compose
 

@@ -129,7 +129,7 @@ go build -tags no_otel -o ./hoocloak ./cmd/hoocloak
 | Command | Contract |
 |---|---|
 | `./hoocloak serve [--config path]` | Loads one strict YAML document before opening a socket. `--config` defaults to `./hoocloak.yaml`. |
-| `./hoocloak hash` | Reads exactly one nonempty newline-terminated value from stdin and writes its bcrypt hash. EOF before the newline, an empty value, or any bytes after that one line are rejected. CRLF input is accepted as one line. |
+| `./hoocloak hash` | Reads one nonempty value of at most 72 bytes from stdin and writes its bcrypt hash. An LF or CRLF terminator is required. Additional input is rejected. Password and service-secret checks enforce the same byte limit. |
 | `./hoocloak health [--url URL] [--timeout duration]` | Defaults to `http://127.0.0.1:8080/ready` and `2s`. The URL must be absolute credential-free HTTP(S), timeout must be positive, redirects are not followed, and only a 2xx response succeeds. |
 | `./hoocloak version` | Prints the embedded version. Local builds use [`internal/version/version`](internal/version/version); release builds stamp the released value. |
 
@@ -240,18 +240,18 @@ Every endpoint below is relative to `/realms/{realm}` unless marked root-only.
 | `/.well-known/openid-configuration` | GET, HEAD | Public discovery document. |
 | `/keys` | GET, HEAD | Public realm JWKS. |
 | `/authorize` | GET, POST | Public SPA authorization entry; registered client/redirect, `response_type=code`, query response mode, `openid`, and S256 PKCE are mandatory. |
-| `/oauth/token` | POST | SPA authorization-code/refresh requests use the public client; service `client_credentials` requires HTTP Basic and rejects credentials in form/query fields. |
-| `/userinfo` | GET, POST | Bearer access token. If an `Origin` is sent, it must exactly match the owning SPA client's configured origins. |
+| `/oauth/token` | POST | SPAs send their `client_id` without credentials for code exchange and refresh. Services use HTTP Basic for `client_credentials`. |
+| `/userinfo` | GET, POST | Send one bearer access token in the Authorization header or a form-encoded POST body. Tokens in the URL are rejected. A browser's `Origin` must exactly match an origin of the owning SPA client. |
 | `/oauth/introspect` | POST | HTTP Basic client authentication; active metadata is returned only for a token owned by that client. |
 | `/revoke` | POST | Public-SPA or Basic-authenticated service revocation. The submitted `token` is handled only within the owning client and unknown/foreign tokens are not disclosed. |
 | `/end_session` | GET, POST | Requires a validated `id_token_hint`; post-logout redirect must belong to that client. Terminates provider state for the verified subject and client. |
-| `/login` | GET, POST | Internal hosted-login endpoint. GET requires an active authorization request; form POST requires the matching CSRF cookie and mode-specific controls. |
+| `/login` | GET, POST | Open the page with one active `authRequestID` in the query. Submit the request ID, CSRF token, and login fields in the POST body with the matching CSRF cookie. |
 | `/logged-out` | GET, HEAD | Realm-relative default signed-out page. |
 | `/assets/*` | GET, HEAD | Realm-relative embedded or external theme assets. |
 | `/healthz` | Any | Root-only liveness response; the current handler does not restrict the HTTP method. `/realms/{realm}/healthz` is intentionally 404. |
 | `/ready` | Any | Root-only readiness across configured realm stores; the current handler does not restrict the HTTP method. `/realms/{realm}/ready` is intentionally 404. |
 
-Token, introspection, and revocation endpoints are POST-only. Security-sensitive scalar parameters on authorize, token, introspection, revocation, end-session, and hosted-login submissions may occur only once. Applicable form bodies are capped at 64 KiB. Introspection and service revocation require HTTP Basic and reject form/query secrets, client assertions, and mixed Basic/form client identities; public SPA revocation uses only its `client_id` and token.
+Send token, introspection, and revocation parameters in an `application/x-www-form-urlencoded` POST body. Parameter names are case-sensitive. Recognized parameters may appear only once, including across query and body, and form bodies are capped at 64 KiB. Introspection and service revocation require HTTP Basic. Public SPA revocation takes only its `client_id` and token. A token identifier (`jti`) alone cannot revoke an access JWT.
 
 ### Scopes and claims
 
@@ -275,7 +275,7 @@ Token, introspection, and revocation endpoints are POST-only. Security-sensitive
 
 - Authorization requests and their codes share a five-minute lifetime. `prompt=none` returns `login_required` because Hoocloak has no provider SSO cookie.
 - A failed code exchange caused by a bad verifier, client, or redirect does not consume the code, so the correct exchange may be retried. PKCE verifiers must contain 43–128 ASCII letters, digits, or `-._~`. A successful exchange is exact-once; concurrent valid redemption permits only one success.
-- Refresh-family lifetime is absolute and non-sliding: rotation never extends the deadline created at first issuance. Each refresh token is single-use. Reusing an ancestor revokes the family.
+- Refresh-family lifetime is absolute: rotation never extends the original deadline. Each refresh token is single-use. Reuse by its owning client revokes the family. A refresh can request fewer scopes for one access token; omitting `scope` on a later refresh restores the original grant. A refresh cannot add permissions outside that grant.
 - Successful rotation removes the predecessor access token's provider metadata. Family replay, revocation, or end-session removes family access metadata, causing userinfo/introspection to reject it immediately.
 - End-session is scoped to the verified ID-token subject plus client. Revocation and introspection are restricted to the owning client. Revocation uses a submitted access/refresh token and client authentication rules; it does **not** use the logout ID-token hint.
 - Metadata invalidation does not retract an already-issued self-contained access JWT from an offline API that validates signature, issuer, audience, and expiry locally. Restart/key-cache behavior has the same distinction.
@@ -512,7 +512,7 @@ themes/aurora/
 └── assets/
 ```
 
-Asset names such as `theme.css`, `theme.js`, or `logo.svg` are illustrative; any files below `assets/` are served at `{{.BasePath}}/assets/`. No executable bit is required.
+Files in `assets/` are served at `{{.BasePath}}/assets/`. Symlinks inside that directory must resolve within it. Restart the provider after replacing the assets directory. No executable bit is required for static files.
 
 Both templates are Go `html/template` files. `logged-out.html` receives only `.BasePath` and must keep login/assets URLs realm-relative. `login.html` receives `.BasePath`, `.RequestID`, `.Client`, `.CSRF`, `.Mode`, `.Username`, `.SelectedID`, `.Identities`, and `.Error`. Startup preflight renders both initial and retry pages in password and select modes, plus the logged-out page, and rejects root-relative `/login` or `/assets/` references. `assets/` must be a directory.
 

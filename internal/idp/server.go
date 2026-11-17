@@ -71,8 +71,22 @@ type SigningKey struct {
 }
 
 type Server struct {
-	Handler http.Handler
-	realms  map[string]*realmServer
+	Handler   http.Handler
+	realms    map[string]*realmServer
+	assetRoot io.Closer
+}
+
+// Close releases the external theme directory after requests have drained.
+func (s *Server) Close() error {
+	if s.assetRoot != nil {
+		return s.assetRoot.Close()
+	}
+	return nil
+}
+
+type externalThemeAssets struct {
+	fs.FS
+	io.Closer
 }
 
 type realmServer struct {
@@ -90,7 +104,7 @@ type realmServer struct {
 	identities    []loginIdentity
 }
 
-func NewServer(cfg config.Config, keys map[string]SigningKey, logger *slog.Logger, clock Clock) (*Server, error) {
+func NewServer(cfg config.Config, keys map[string]SigningKey, logger *slog.Logger, clock Clock) (_ *Server, err error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -98,11 +112,17 @@ func NewServer(cfg config.Config, keys map[string]SigningKey, logger *slog.Logge
 	if err != nil {
 		return nil, fmtError("load login theme", err)
 	}
+	server := &Server{realms: make(map[string]*realmServer, len(cfg.Realms))}
+	server.assetRoot, _ = uiAssets.(io.Closer)
+	defer func() {
+		if err != nil {
+			_ = server.Close()
+		}
+	}()
 	if len(keys) != len(cfg.Realms) {
 		return nil, fmt.Errorf("signing keys must contain exactly one entry per realm")
 	}
 
-	server := &Server{realms: make(map[string]*realmServer, len(cfg.Realms))}
 	root := http.NewServeMux()
 	probes := make([]op.ProbesFn, 0, len(cfg.Realms))
 	for _, realm := range cfg.Realms {
@@ -212,6 +232,7 @@ func loadUI(themeDir string) (*template.Template, fs.FS, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open theme root: %w", err)
 	}
+	defer root.Close()
 	themeFS := root.FS()
 	templates := template.New("theme").Funcs(uiTemplateFuncs).Option("missingkey=error")
 	for _, file := range []struct {
@@ -229,21 +250,16 @@ func loadUI(themeDir string) (*template.Template, fs.FS, error) {
 			return nil, nil, fmt.Errorf("parse %s: %w", file.path, err)
 		}
 	}
-	assets, err := fs.Sub(themeFS, "assets")
-	if err != nil {
-		return nil, nil, fmt.Errorf("open assets: %w", err)
-	}
-	assetInfo, err := fs.Stat(assets, ".")
-	if err != nil {
-		return nil, nil, fmt.Errorf("open assets: %w", err)
-	}
-	if !assetInfo.IsDir() {
-		return nil, nil, errors.New("open assets: assets must be a directory")
-	}
 	if err := preflightUITemplates(templates); err != nil {
 		return nil, nil, err
 	}
-	return templates, assets, nil
+	// fs.Sub only prefixes paths. Give public asset lookups their own OS
+	// root so symlinks are resolved within assets, not the whole theme.
+	assets, err := root.OpenRoot("assets")
+	if err != nil {
+		return nil, nil, fmt.Errorf("open assets directory: %w", err)
+	}
+	return templates, externalThemeAssets{assets.FS(), assets}, nil
 }
 
 func preflightUITemplates(templates *template.Template) error {
@@ -1027,29 +1043,34 @@ func discoveryMetadata(issuer string, scopes []string) map[string]any {
 		"id_token_signing_alg_values_supported": []string{"RS256"}, "token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic"},
 		"revocation_endpoint_auth_methods_supported": []string{"none", "client_secret_basic"}, "introspection_endpoint_auth_methods_supported": []string{"client_secret_basic"},
 		"code_challenge_methods_supported": []string{"S256"}, "claims_supported": slices.Clone(supportedClaims),
+		"request_uri_parameter_supported": false,
 	}
 }
 
 func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/oauth/token" {
+		fields, hasForm := protocolFields[r.URL.Path]
+		if hasForm {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Referrer-Policy", "no-referrer")
 		}
-		if r.URL.Path == "/device_authorization" {
+		allow, known := providerEndpointMethods(r.URL.Path)
+		if !known {
 			http.NotFound(w, r)
 			return
 		}
-		if allow, known := providerEndpointMethods(r.URL.Path); known && !methodAllowed(r.Method, allow) {
+		if !methodAllowed(r.Method, allow) {
 			w.Header().Set("Allow", allow)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if r.Method == http.MethodPost {
-			switch r.URL.Path {
-			case "/authorize", "/oauth/token", "/oauth/introspect", "/revoke", "/userinfo", "/end_session":
-				r.Body = http.MaxBytesReader(w, r.Body, maxFormBodyBytes)
-			}
+		if hasForm && !parseProtocolForm(w, r, fields) {
+			return
+		}
+		if hasForm && len(r.Header.Values("Authorization")) > 1 {
+			oauthError(w, http.StatusBadRequest, "invalid_request", "Authorization must not be repeated", false)
+			return
 		}
 		switch r.URL.Path {
 		case "/authorize":
@@ -1061,55 +1082,41 @@ func (s *realmServer) protocolGates(next http.Handler) http.Handler {
 				return
 			}
 		case "/oauth/token":
-			if !s.tokenGate(w, r) {
+			if !s.tokenGate(w, r) || !protocolFieldsInBody(w, r) {
 				return
+			}
+			if r.Form.Get("grant_type") == "refresh_token" {
+				r = r.WithContext(withRefreshClient(r.Context(), r.Form.Get("client_id")))
 			}
 		case "/oauth/introspect", "/revoke":
-			if err := r.ParseForm(); err != nil {
-				oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
+			if !s.mutationClientAuthenticationGate(w, r) || !protocolFieldsInBody(w, r) {
 				return
 			}
-			if !rejectRepeatedFormParameters(w, r, "token", "token_type_hint", "client_id", "client_secret") {
-				return
-			}
-			if !s.mutationClientAuthenticationGate(w, r) {
+			if r.Form.Get("token") == "" {
+				oauthError(w, http.StatusBadRequest, "invalid_request", "token is required", false)
 				return
 			}
 		case "/userinfo":
-			if r.Method == http.MethodPost {
-				if err := r.ParseForm(); err != nil {
-					oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
-					return
-				}
+			if r.Form.Has("access_token") && (r.Header.Get("Authorization") != "" || !r.PostForm.Has("access_token")) {
+				oauthError(w, http.StatusBadRequest, "invalid_request", "send one bearer token in the Authorization header or POST body", false)
+				return
 			}
+			s.userinfoResponse(next, w, r)
+			return
 		case "/end_session":
-			if err := r.ParseForm(); err != nil {
-				oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
-				return
-			}
-			if !rejectRepeatedFormParameters(w, r, "id_token_hint", "post_logout_redirect_uri", "state", "client_id") {
-				return
-			}
 			if strings.TrimSpace(r.Form.Get("id_token_hint")) == "" {
 				oauthError(w, http.StatusBadRequest, "invalid_request", "id_token_hint is required", false)
 				return
 			}
 		}
-		if r.URL.Path == "/userinfo" {
-			s.userinfoResponse(next, w, r)
-			return
-		}
-
 		next.ServeHTTP(w, r)
 	})
 }
 
 func (s *realmServer) mutationClientAuthenticationGate(w http.ResponseWriter, r *http.Request) bool {
-	for _, field := range []string{"client_secret", "client_assertion", "client_assertion_type"} {
-		if _, exists := r.Form[field]; exists {
-			oauthError(w, http.StatusUnauthorized, "invalid_client", "client credentials must use HTTP Basic authentication", true)
-			return false
-		}
+	if hasClientSecretFields(r) {
+		oauthError(w, http.StatusUnauthorized, "invalid_client", "client credentials must use HTTP Basic authentication", true)
+		return false
 	}
 	if _, exists := r.Form["client_id"]; exists {
 		client := s.Store.clients[r.Form.Get("client_id")]
@@ -1128,7 +1135,7 @@ func (s *realmServer) mutationClientAuthenticationGate(w http.ResponseWriter, r 
 }
 
 func (s *realmServer) callbackGate(w http.ResponseWriter, r *http.Request) bool {
-	requestID := r.URL.Query().Get("id")
+	requestID := r.Form.Get("id")
 	if requestID == "" {
 		http.Error(w, "invalid authorization completion", http.StatusBadRequest)
 		return false
@@ -1185,11 +1192,8 @@ func validS256CodeChallenge(value string) bool {
 }
 
 func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool {
-	if err := r.ParseForm(); err != nil {
-		oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
-		return false
-	}
-	if !rejectRepeatedFormParameters(w, r, "client_id", "response_type", "response_mode", "scope", "redirect_uri", "code_challenge", "code_challenge_method", "state", "nonce") {
+	if r.Form.Get("request_uri") != "" {
+		oauthError(w, http.StatusBadRequest, "request_uri_not_supported", "request_uri is not supported", false)
 		return false
 	}
 	for _, field := range []string{"state", "nonce"} {
@@ -1200,7 +1204,8 @@ func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool
 	}
 	client := s.Store.clients[r.Form.Get("client_id")]
 	if client == nil || client.config.Type != config.ClientTypeSPA {
-		return true
+		oauthError(w, http.StatusBadRequest, "invalid_request", "a registered SPA client is required", false)
+		return false
 	}
 	if redirectURI := r.Form.Get("redirect_uri"); !slices.Contains(client.config.RedirectURIs, redirectURI) {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "redirect_uri is not registered", false)
@@ -1214,7 +1219,7 @@ func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool
 		oauthError(w, http.StatusBadRequest, "invalid_request", "response_mode must be query", false)
 		return false
 	}
-	scopes := strings.Fields(r.Form.Get("scope"))
+	scopes := strings.Split(r.Form.Get("scope"), " ")
 	if !slices.Contains(scopes, oidc.ScopeOpenID) {
 		oauthError(w, http.StatusBadRequest, "invalid_scope", "openid is required", false)
 		return false
@@ -1231,16 +1236,6 @@ func (s *realmServer) authorizeGate(w http.ResponseWriter, r *http.Request) bool
 	}
 	return true
 }
-func rejectRepeatedFormParameters(w http.ResponseWriter, r *http.Request, parameters ...string) bool {
-	for _, parameter := range parameters {
-		if len(r.Form[parameter]) > 1 {
-			oauthError(w, http.StatusBadRequest, "invalid_request", parameter+" must not be repeated", false)
-			return false
-		}
-	}
-	return true
-}
-
 func validCodeVerifier(value string) bool {
 	if len(value) < 43 || len(value) > 128 {
 		return false
@@ -1258,35 +1253,25 @@ func validCodeVerifier(value string) bool {
 }
 
 func (s *realmServer) tokenGate(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method != http.MethodPost {
-		return true
-	}
-	if err := r.ParseForm(); err != nil {
-		oauthError(w, http.StatusBadRequest, "invalid_request", "unable to parse request", false)
-		return false
-	}
-	if !rejectRepeatedFormParameters(w, r, "grant_type", "code", "client_id", "client_secret", "redirect_uri", "code_verifier", "refresh_token", "scope") {
-		return false
-	}
-	if r.Form.Get("grant_type") == "authorization_code" && !validCodeVerifier(r.Form.Get("code_verifier")) {
-		oauthError(w, http.StatusBadRequest, "invalid_request", "code_verifier must contain 43 to 128 ASCII unreserved characters", false)
-		return false
-	}
-	if r.Form.Get("grant_type") != "client_credentials" {
-		return true
-	}
-	for _, field := range []string{"client_id", "client_secret", "client_assertion", "client_assertion_type"} {
-		if _, exists := r.Form[field]; exists {
-			oauthError(w, http.StatusUnauthorized, "invalid_client", "client credentials must use HTTP Basic authentication", true)
+	switch r.Form.Get("grant_type") {
+	case "authorization_code", "refresh_token":
+		if len(r.Header.Values("Authorization")) != 0 || hasClientSecretFields(r) {
+			oauthError(w, http.StatusUnauthorized, "invalid_client", "public clients must use client_id without credentials", false)
 			return false
 		}
+		if r.Form.Get("grant_type") == "authorization_code" && !validCodeVerifier(r.Form.Get("code_verifier")) {
+			oauthError(w, http.StatusBadRequest, "invalid_request", "code_verifier must contain 43 to 128 ASCII unreserved characters", false)
+			return false
+		}
+		return true
+	case "client_credentials":
+		return s.mutationClientAuthenticationGate(w, r)
+	case "":
+		oauthError(w, http.StatusBadRequest, "invalid_request", "grant_type is required", false)
+	default:
+		oauthError(w, http.StatusBadRequest, "unsupported_grant_type", "grant_type is not supported", false)
 	}
-	id, secret, ok := r.BasicAuth()
-	if !ok || id == "" || secret == "" {
-		oauthError(w, http.StatusUnauthorized, "invalid_client", "client credentials must use HTTP Basic authentication", true)
-		return false
-	}
-	return true
+	return false
 }
 func oauthError(w http.ResponseWriter, status int, code, description string, basic bool) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1506,7 +1491,10 @@ func (s *realmServer) loginPageData(requestID, client, csrf string) loginData {
 }
 
 func (s *realmServer) loginGET(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("authRequestID")
+	if !parseLoginForm(w, r) {
+		return
+	}
+	id := r.Form.Get("authRequestID")
 	client, err := s.Store.LoginInfo(id)
 	if err != nil {
 		http.Error(w, "invalid or expired authorization request", http.StatusBadRequest)
@@ -1528,15 +1516,8 @@ func (s *realmServer) loginPOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBodyBytes)
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid login request", http.StatusBadRequest)
+	if !parseLoginForm(w, r) {
 		return
-	}
-	for _, parameter := range []string{"authRequestID", "csrf", "identity", "username", "password"} {
-		if len(r.PostForm[parameter]) > 1 {
-			http.Error(w, "invalid login request", http.StatusBadRequest)
-			return
-		}
 	}
 	id := r.PostForm.Get("authRequestID")
 	client, err := s.Store.LoginInfo(id)

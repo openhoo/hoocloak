@@ -7,9 +7,9 @@ require (
 	github.com/rs/cors v1.11.1
 	github.com/zitadel/oidc/v3 v3.48.0
 	go.yaml.in/yaml/v3 v3.0.6
-	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.60.0
-	golang.org/x/text v0.42.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/net v0.62.0
+	golang.org/x/text v0.44.0
 )
 
 require (
