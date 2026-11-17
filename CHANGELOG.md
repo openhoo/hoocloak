@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 2.1.3 (2026-11-17)
+
+### Bug Fixes
+
+- **hoocloak:** harden provider flows and align configuration (ec37515)
+
 ## 2.1.2 (2026-11-13)
 
 ### Bug Fixes
