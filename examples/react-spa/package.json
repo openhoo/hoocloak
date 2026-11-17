@@ -19,7 +19,11 @@
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.4",
+    "picomatch": "file:vendor/hoocloak-picomatch-4.0.7-hoocloak.1.tgz",
     "typescript": "7.0.2",
     "vite": "8.3.8"
+  },
+  "overrides": {
+    "picomatch": "$picomatch"
   }
 }
