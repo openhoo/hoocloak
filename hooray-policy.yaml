@@ -18,3 +18,17 @@ rules:
       kinds: [vulnerability, secret, iac, sast, malware]
       minimum_severity: high
       confidence: [high]
+exceptions:
+  - id: provider-review-picomatch-build-only
+    owner: wakemeup0
+    reason: Deliver the provider fixes while the frontend dependency fix is validated separately
+    ticket: https://github.com/openhoo/hoocloak/issues/47
+    expires_at: "2026-11-19T00:00:00Z"
+    compensating_controls:
+      - The provider and example images contain only compiled frontend assets; neither ships the npm build dependency.
+      - The frontend builds use repository-controlled inputs.
+    selectors:
+      policy_id: deny-high-confidence-security-findings
+      kind: vulnerability
+      purl: pkg:npm/picomatch@4.0.7
+      advisory_id: GHSA-fc5q-39xc-vjpf
