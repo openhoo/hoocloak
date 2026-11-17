@@ -1,5 +1,11 @@
 # hoocloak Changelog
 
+## 2.1.4 (2026-11-17)
+
+### Bug Fixes
+
+- **deps:** backport picomatch parser security fix (a83f528)
+
 ## 2.1.3 (2026-11-17)
 
 ### Bug Fixes
