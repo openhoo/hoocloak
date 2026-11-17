@@ -26,7 +26,7 @@ work=$(mktemp -d)
     'qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==' &&
   tar -xzf picomatch-4.0.7.tgz &&
   cd package &&
-  git apply "$repo/vendor/picomatch/GHSA-fc5q-39xc-vjpf.patch" &&
+  git apply "$repo/third_party/picomatch/GHSA-fc5q-39xc-vjpf.patch" &&
   npm pkg set name=@hoocloak/picomatch version=4.0.7-hoocloak.1 &&
   npm pkg set private=true --json &&
   npm pack --ignore-scripts --pack-destination ..
