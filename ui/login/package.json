@@ -13,7 +13,7 @@
     "picomatch": "file:vendor/hoocloak-picomatch-4.0.7-hoocloak.1.tgz",
     "typescript": "7.0.2",
     "vite": "8.3.8",
-    "vite-plugin-solid": "2.11.16"
+    "vite-plugin-solid": "2.11.17"
   },
   "overrides": {
     "picomatch": "$picomatch"
