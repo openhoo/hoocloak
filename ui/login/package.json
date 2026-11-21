@@ -7,7 +7,7 @@
     "build": "vite build"
   },
   "dependencies": {
-    "solid-js": "1.9.19"
+    "solid-js": "1.9.20"
   },
   "devDependencies": {
     "picomatch": "file:vendor/hoocloak-picomatch-4.0.7-hoocloak.1.tgz",
